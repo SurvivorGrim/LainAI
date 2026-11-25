@@ -66,6 +66,7 @@ class ImageEngine:
         self.port = _free_port()
         self.url = "http://127.0.0.1:%d" % self.port
         self.proc = None
+        self.loaded = True
         try:
             self.version = open(os.path.join(root, "engine", "image", "VERSION")).read().strip()
         except OSError:
@@ -91,6 +92,7 @@ class ImageEngine:
         diff, llm, vae = self.files()
         args = [self.exe, "--diffusion-model", diff, "--llm", llm, "--vae", vae,
                 "--offload-to-cpu",                     # text encoder and drawing model take turns in video memory
+                "--eager-load",                         # read every weight before the server opens (no prompt until loaded)
                 "--vae-tiling",                         # decode big pictures in tiles (less video memory)
                 "--listen-ip", "127.0.0.1", "--listen-port", str(self.port),
                 "--steps", str(self.pick["steps"]), "--cfg-scale", str(self.pick["cfg"]),
@@ -124,8 +126,8 @@ class ImageEngine:
 
     def wait_ready(self):
         t0 = time.time()
-        io = _IoReader(self.proc)
-        base = io.read()
+        io = self._io = _IoReader(self.proc)
+        base = self._base = io.read()
         ui.out()
         ui.hi("Loading %s (image studio)" % self.pick["name"])
         ui.say("engine stable-diffusion.cpp %s (%s)  |  models %s on the drive" % (self.version, self.flavor, ui.human(self.total)))
@@ -154,13 +156,18 @@ class ImageEngine:
             if sp:
                 sp.__exit__(None, None, None)
             elif not done_reading:
-                ui.out("\n\033[2K", end="")
+                ui.out("\r\033[2K", end="")       # erase the bar line
         if self.proc.poll() is not None:
             ui.red("The image engine stopped while loading. Last log lines:")
             for l in open(self.log_path, encoding="utf-8", errors="replace").read().splitlines()[-15:]:
                 ui.out("   " + ui.DIM + l + ui.R)
             return False
         ui.grn("Image studio ready  (%s)" % ui.fmt_time(time.time() - t0))
+        # newer sd.cpp opens the server before reading the weights; they are read on the first picture
+        self.loaded = max(0, io.read() - base) >= self.total * 0.5
+        if not self.loaded:
+            ui.center("The models (%s) are read from the drive when you make your first picture - "
+                      "that one takes longer." % ui.human(self.total), ui.WARN)
         if not self.pick.get("img_gpu"):
             ui.center("No graphics card with enough free memory - drawing on the CPU. Expect minutes per picture.", ui.WARN)
         return True
@@ -206,7 +213,15 @@ class ImageEngine:
                     raise RuntimeError(err.get("message") if isinstance(err, dict) else str(err) or st)
                 pv = j.get("preview") or {}
                 el = ui.fmt_time(time.time() - t0)
+                if pv.get("total_steps"):
+                    self.loaded = True
+                got = 0 if self.loaded else max(0, self._io.read() - self._base)
                 if st == "queued":
+                    text = "queued"
+                elif not self.loaded and got < self.total * 0.985:
+                    text = "loading models from the drive %s %s / %s" % (
+                        ui.bar_str(got / self.total, 20), ui.human(got), ui.human(self.total))
+                elif st == "queued":
                     text = "queued"
                 elif pv.get("total_steps"):
                     text = "drawing %s step %d/%d" % (ui.bar_str(pv["step"] / pv["total_steps"], 20), pv["step"], pv["total_steps"])
