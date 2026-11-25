@@ -44,9 +44,19 @@ function Ask($q, $def) {
 function YesNo($q, $def) { return ((Ask $q $def) -match '^[yY]') }
 function IsAdmin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 function Human([double]$b) { foreach ($u in 'B','KB','MB','GB','TB') { if ($b -lt 1024 -or $u -eq 'TB') { return ('{0:N1} {1}' -f $b, $u) }; $b /= 1024 } }
+function Get-Fs($v) {
+    # Filesystem name of a Get-Volume result. Use the FileSystem string: FileSystemType is an enum
+    # that has no exFAT value on some Windows builds and reports exFAT volumes as 'Unknown'.
+    if (-not $v) { return '' }
+    if ($v.FileSystem) { return "$($v.FileSystem)" }
+    return "$($v.FileSystemType)"
+}
 function RunElevated([string]$code) {
     # Runs a PowerShell snippet as administrator (one UAC prompt) and waits for it.
-    if (IsAdmin) { & ([scriptblock]::Create($code)); return $true }
+    if (IsAdmin) {
+        try { & ([scriptblock]::Create($code)); return $true }
+        catch { Write-Host "  $_" -ForegroundColor Red; return $false }   # same as the elevated path: report, don't kill the installer
+    }
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ErrorActionPreference='Stop'; try { $code; exit 0 } catch { Write-Host `$_ -ForegroundColor Red; Start-Sleep 8; exit 1 }"))
     try { $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc }
     catch { Warn "administrator permission was declined"; return $false }    # "No" on the UAC prompt throws
@@ -123,7 +133,7 @@ function Get-Candidates {
             }
             if (-not $v) { continue }
             $vols++
-            $out += [pscustomobject]@{ Disk = $d.Number; Letter = $p.DriveLetter; Fs = $v.FileSystemType; Label = $v.FileSystemLabel
+            $out += [pscustomobject]@{ Disk = $d.Number; Letter = $p.DriveLetter; Fs = (Get-Fs $v); Label = $v.FileSystemLabel
                 Size = $p.Size; Free = $v.SizeRemaining; Model = $d.FriendlyName; Bus = $d.BusType; Part = $p.PartitionNumber; GptType = $p.GptType }
         }
         if ($vols -eq 0) {
@@ -133,7 +143,7 @@ function Get-Candidates {
     }
     foreach ($v in $remVols) {   # card readers etc. that Get-Disk didn't flag
         if ($out | Where-Object { $_.Letter -eq $v.DriveLetter }) { continue }
-        $out += [pscustomobject]@{ Disk = $null; Letter = $v.DriveLetter; Fs = $v.FileSystemType; Label = $v.FileSystemLabel
+        $out += [pscustomobject]@{ Disk = $null; Letter = $v.DriveLetter; Fs = (Get-Fs $v); Label = $v.FileSystemLabel
             Size = $v.Size; Free = $v.SizeRemaining; Model = 'removable drive'; Bus = 'Removable'; Part = 0; GptType = $null }
     }
     return ,$out
@@ -164,7 +174,7 @@ function Show-Contents($d) {
     Write-Host ("  disk {0}  ·  {1}  ·  {2}" -f $d.Number, (Human $d.Size), $d.FriendlyName) -ForegroundColor White
     foreach ($p in @(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue)) {
         $v = $p | Get-Volume -ErrorAction SilentlyContinue
-        Info ("    partition {0}  {1}  {2} {3}" -f $p.PartitionNumber, (Human $p.Size), $(if ($p.DriveLetter) { "$($p.DriveLetter):" } else { '' }), $(if ($v) { "$($v.FileSystemType) $($v.FileSystemLabel)" } else { '(not readable on Windows)' }))
+        Info ("    partition {0}  {1}  {2} {3}" -f $p.PartitionNumber, (Human $p.Size), $(if ($p.DriveLetter) { "$($p.DriveLetter):" } else { '' }), $(if ($v) { "$(Get-Fs $v) $($v.FileSystemLabel)" } else { '(not readable on Windows)' }))
         if (-not $p.DriveLetter) { continue }
         $root = "$($p.DriveLetter):\"
         $items = @(Get-ChildItem $root -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin 'System Volume Information', '$RECYCLE.BIN' })
@@ -189,7 +199,7 @@ function Test-LainVolume($disk, $letter) {
     if ($p) { $v = $p | Get-Volume -ErrorAction SilentlyContinue; $r.Letter = $p.DriveLetter; $r.Part = $p.PartitionNumber }
     elseif ($letter) { $v = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue; $r.Letter = $letter }   # card readers
     else { $r.Problem = "it has no partition yet - it isn't formatted"; return $r }
-    if ($v) { $r.Fs = "$($v.FileSystemType)"; $r.Label = "$($v.FileSystemLabel)" }
+    if ($v) { $r.Fs = Get-Fs $v; $r.Label = "$($v.FileSystemLabel)" }
     if ($r.Letter -eq [char]0) { $r.Letter = $null }
     if ($p -and $p.GptType -eq $LinuxData) { $r.Problem = "the partition is tagged 'Linux filesystem', so Windows hides it"; return $r }
     switch -Regex ($r.Fs) {
@@ -295,8 +305,8 @@ function Fix-LainTag($c) {
     Start-Sleep 2
     $p = Get-Partition -DiskNumber $c.Disk -PartitionNumber $c.Part
     $v = $p | Get-Volume -ErrorAction SilentlyContinue
-    if ($p.DriveLetter -and $v -and $v.FileSystemType -in 'exFAT', 'NTFS') {
-        Ok "partition is now 'Microsoft basic data': $($p.DriveLetter): $($v.FileSystemType) - files untouched"
+    if ($p.DriveLetter -and $v -and (Get-Fs $v) -in 'exFAT', 'NTFS') {
+        Ok "partition is now 'Microsoft basic data': $($p.DriveLetter): $(Get-Fs $v) - files untouched"
         return "$($p.DriveLetter):\"
     }
     Warn "it isn't exFAT/NTFS underneath (probably a Linux filesystem) - putting the tag back; it has to be formatted"
@@ -309,7 +319,15 @@ $Fs = ''
 if ($Drive) {
     if (-not (Test-Path $Drive)) { Die "not found: $Drive" }
     $Drive = (Resolve-Path $Drive).Path
-    try { $Fs = (Get-Volume -DriveLetter $Drive[0] -ErrorAction Stop).FileSystemType } catch {}
+    if ($Format) {
+        # -Drive + -Format: format that drive (still asks for ERASE) instead of silently skipping it
+        $dp = Get-Partition -DriveLetter $Drive[0] -ErrorAction SilentlyContinue
+        $c = [pscustomobject]@{ Disk = $(if ($dp) { $dp.DiskNumber } else { $null }); Letter = $Drive[0] }
+        $t = Format-LainDisk $c
+        if (-not $t) { Die "the drive wasn't formatted - nothing was installed" }
+        $Drive = $t
+    }
+    try { $Fs = Get-Fs (Get-Volume -DriveLetter $Drive[0] -ErrorAction Stop) } catch {}
 } else {
     while ($true) {
         $cands = Get-Candidates
@@ -345,7 +363,7 @@ if ($Drive) {
             if ($choice -notmatch '^[fF]') { continue }
             $target = Format-LainDisk $c
             if (-not $target) { Warn "no usable drive yet - pick again"; continue }
-            $Fs = (Get-Volume -DriveLetter $target[0]).FileSystemType
+            $Fs = Get-Fs (Get-Volume -DriveLetter $target[0] -ErrorAction SilentlyContinue)
             $Drive = $target; break
         }
 
@@ -378,7 +396,7 @@ if ($Drive) {
                 $target = if ($l -and $l -ne [char]0) { "${l}:\" } else { Warn "it still has no drive letter - try unplugging and replugging it"; $null }
             }
         } else { continue }
-        if ($target) { $Fs = (Get-Volume -DriveLetter $target[0] -ErrorAction SilentlyContinue).FileSystemType }
+        if ($target) { $Fs = Get-Fs (Get-Volume -DriveLetter $target[0] -ErrorAction SilentlyContinue) }
         if (-not $target) { Warn "no usable drive letter - pick again"; continue }
         $Drive = $target; break
     }
