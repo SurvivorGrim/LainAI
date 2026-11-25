@@ -156,7 +156,10 @@ class ImageEngine:
             if sp:
                 sp.__exit__(None, None, None)
             elif not done_reading:
-                ui.out("\r\033[2K", end="")       # erase the bar line
+                if max(0, io.read() - base) >= self.total * 0.5:
+                    prog.done("models read in %s" % ui.fmt_time(time.time() - t0))   # finish bar + clear log line
+                else:
+                    ui.out("\r\033[2K\n\033[2K\033[1A", end="")   # erase bar and the log line under it
         if self.proc.poll() is not None:
             ui.red("The image engine stopped while loading. Last log lines:")
             for l in open(self.log_path, encoding="utf-8", errors="replace").read().splitlines()[-15:]:
