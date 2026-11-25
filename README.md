@@ -38,13 +38,35 @@ RAM, and **Laptop** for anything else.
 
 ## Install
 
-You need a USB drive or portable SSD (**128 GB or more** for everything, ~16 GB for the
-Laptop models only) and an internet connection while installing.
+### Before you install
 
-**Linux**
+You **don't** need Python, git or any AI software on the computer. The installer downloads its own
+portable Python, and everything else goes onto the drive.
+
+You do need:
+
+- A USB drive or portable SSD: **128 GB or more** for everything, ~16 GB for the Laptop models only
+- An internet connection while installing
+- A 64-bit x86 PC (not ARM)
+- **Linux:** a user account that can use `sudo` (the installer asks before installing system packages)
+- **Windows:** Windows 10 version 1809 or newer, and permission to approve an administrator prompt
+  (for the Microsoft Visual C++ runtime and for formatting the drive)
+- **NVIDIA graphics cards:** the NVIDIA driver. The installer can't install it because it needs a
+  reboot, but it checks for it and tells you how to install it. Without it, Lain still runs, just slower.
+  AMD and Intel graphics work with the drivers that come with Windows or Linux.
+
+**Using the drive on other computers:** nothing gets installed on a computer you just plug the drive
+into. On Windows, if Lain's engine won't start on a new PC, install the
+[Microsoft Visual C++ runtime](https://aka.ms/vs/17/release/vc_redist.x64.exe) there (many PCs already
+have it). Standard Linux desktops already have what Lain needs.
+
+### Install
+
+**Linux**: download the ZIP (green **Code** button → Download ZIP), extract it, open a terminal
+in the extracted folder and run `bash install.sh`. Or, if you have git:
 ```bash
-git clone https://github.com/<you>/lain-ai.git
-cd lain-ai
+git clone https://github.com/SurvivorGrim/LainAI.git
+cd LainAI
 bash install.sh
 ```
 
