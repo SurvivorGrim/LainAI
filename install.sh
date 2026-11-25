@@ -267,8 +267,7 @@ else
     echo "   ${C_H}1)${C_R} Format as exFAT for Windows + Linux  ${C_E}(ERASES everything on the drive)${C_R}"
     if [ $keep = 1 ]; then
       echo "   ${C_H}2)${C_R} Keep the files and install onto it as it is$([ $badtag = 1 ] && echo " (and fix the partition tag - files stay)")"
-      def=1; [ -n "$m" ] && [ -d "$m/LainAI" ] && def=2     # existing Lain drive: default to updating it
-      [ "$FORMAT" = 1 ] && def=1
+      def=2; [ "$FORMAT" = 1 ] && def=1                       # usable as it is: never default to erasing it
       echo "   ${C_H}b)${C_R} back to the drive list"
       c="$(ask "Choose [$def]:" "$def")"
     else

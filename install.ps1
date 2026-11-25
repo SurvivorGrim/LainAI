@@ -2,7 +2,8 @@
   Lain AI installer for Windows.
     Double-click install.bat   (or:  powershell -ExecutionPolicy Bypass -File install.ps1)
     Options:  -Drive E:\   -Models all|recommended|none|best,mid,laptop   -Yes   -NoDeps   -Format   -RestoreVault C:\path\to\backup
-    -Format preselects "format the drive" (you still type ERASE).
+    -Format preselects "format the drive" (you still type ERASE). Without it, a drive that is already
+    usable (exFAT/NTFS with a drive letter) is never formatted unless you choose to.
   What it does:
     1. installs what Lain needs on this PC (Microsoft Visual C++ runtime), checks GPU drivers
     2. finds removable drives, lets you pick one (offers to format it exFAT for Windows + Linux)
@@ -47,7 +48,8 @@ function RunElevated([string]$code) {
     # Runs a PowerShell snippet as administrator (one UAC prompt) and waits for it.
     if (IsAdmin) { & ([scriptblock]::Create($code)); return $true }
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ErrorActionPreference='Stop'; try { $code; exit 0 } catch { Write-Host `$_ -ForegroundColor Red; Start-Sleep 8; exit 1 }"))
-    $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc
+    try { $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc }
+    catch { Warn "administrator permission was declined"; return $false }    # "No" on the UAC prompt throws
     return ($p.ExitCode -eq 0)
 }
 
@@ -102,7 +104,9 @@ if ($gpus | Where-Object { $_.Name -match 'NVIDIA' }) {
 
 # ------------------------------------------------------------------ 2. pick the drive
 Step "Choosing the drive"
+function Refresh-Storage { try { Update-HostStorageCache -ErrorAction Stop } catch {} }   # Get-Disk/Get-Volume cache stale info otherwise
 function Get-Candidates {
+    Refresh-Storage
     $out = @()
     $disks = @(Get-Disk | Where-Object { -not $_.IsBoot -and -not $_.IsSystem -and ($_.BusType -in 'USB','SD','MMC' -or $_.IsRemovable) })
     $remVols = @(Get-Volume | Where-Object { $_.DriveType -eq 'Removable' -and $_.DriveLetter })
@@ -172,8 +176,76 @@ function Show-Contents($d) {
     }
 }
 
+function Test-LainVolume($disk, $letter) {
+    # Is the drive usable for Lain as it is right now? Looks at the biggest data partition.
+    # Returns Ready/Letter/Fs/Label/Part plus Problem (why not) or Note (usable, but worth knowing).
+    Refresh-Storage
+    $r = [pscustomobject]@{ Ready = $false; Letter = $null; Fs = ''; Label = ''; Disk = $disk; Part = $null; Problem = ''; Note = '' }
+    if ($null -ne $disk) {
+        if (-not (Get-Disk -Number $disk -ErrorAction SilentlyContinue)) { $r.Problem = "disk $disk isn't there any more - was it unplugged? Go back (b) and rescan"; return $r }
+        $parts = @(Get-Partition -DiskNumber $disk -ErrorAction SilentlyContinue | Where-Object { $_.Type -notin 'Reserved','System','Recovery' } | Sort-Object Size -Descending)
+    } else { $parts = @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue) }
+    $p = $parts | Select-Object -First 1
+    if ($p) { $v = $p | Get-Volume -ErrorAction SilentlyContinue; $r.Letter = $p.DriveLetter; $r.Part = $p.PartitionNumber }
+    elseif ($letter) { $v = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue; $r.Letter = $letter }   # card readers
+    else { $r.Problem = "it has no partition yet - it isn't formatted"; return $r }
+    if ($v) { $r.Fs = "$($v.FileSystemType)"; $r.Label = "$($v.FileSystemLabel)" }
+    if ($r.Letter -eq [char]0) { $r.Letter = $null }
+    if ($p -and $p.GptType -eq $LinuxData) { $r.Problem = "the partition is tagged 'Linux filesystem', so Windows hides it"; return $r }
+    switch -Regex ($r.Fs) {
+        '^exFAT$' { }
+        '^NTFS$'  { $r.Note = "it's NTFS - works on Windows and most Linux, but exFAT is the safer cross-OS choice" }
+        '^FAT'    { $r.Problem = "it's FAT32, which can't hold files over 4 GB (the models are bigger) - format it as exFAT"; return $r }
+        '^(|RAW|Unknown)$' { $r.Problem = "it isn't formatted yet"; return $r }
+        default   { $r.Problem = "it's '$($r.Fs)', which isn't usable on both Windows and Linux - format it as exFAT"; return $r }
+    }
+    if (-not $r.Letter) { $r.Problem = "it's formatted ($($r.Fs)) but has no drive letter yet"; return $r }
+    $r.Ready = $true
+    return $r
+}
+
+function Add-LainLetter($st) {
+    if ($null -eq $st.Disk -or $null -eq $st.Part) { return }
+    Info "giving it a drive letter (Windows will ask for administrator permission)..."
+    RunElevated "Add-PartitionAccessPath -DiskNumber $($st.Disk) -PartitionNumber $($st.Part) -AssignDriveLetter" | Out-Null
+    Start-Sleep 2
+}
+
+function Wait-LainReady($disk, $letter) {
+    # The person formats (with our elevated script, Windows' pop-up "Format disk" window, Explorer or
+    # Disk Management - any of them is fine) and tells us when it's done; then we check the drive.
+    Write-Host ""
+    Info "If Windows pops up its own 'Format' window, you can use it: File system exFAT, then Start."
+    Info "Or format it yourself: File Explorer > right-click the drive > Format... > exFAT > Start."
+    $auto = 0
+    while ($true) {
+        if ($Yes) { Start-Sleep 3; $auto++ } else {
+            $a = Read-Host "  Press Enter when formatting has finished  (o = open Disk Management · b = back to the drive list)"
+            if ($a -match '^[bB]') { return $null }
+            if ($a -match '^[oO]') { Start-Process diskmgmt.msc; continue }
+        }
+        Info "checking the drive..."
+        $st = Test-LainVolume $disk $letter
+        if (-not $st.Ready -and -not $st.Letter -and $st.Fs -match '^(exFAT|NTFS)$') { Add-LainLetter $st; $st = Test-LainVolume $disk $letter }
+        if ($st.Ready) {
+            if ($st.Note) { Warn $st.Note }
+            Ok "drive is ready: $($st.Letter):  $($st.Fs)  '$($st.Label)'$(if ($st.Fs -eq 'exFAT') { ' - readable on Windows, Linux and macOS' })"
+            return "$($st.Letter):\"
+        }
+        Warn "not ready yet: $($st.Problem)"
+        if ($Yes -and $auto -ge 40) { Warn "gave up waiting after 2 minutes"; return $null }
+    }
+}
+
 function Format-LainDisk($c) {
-    if ($null -eq $c.Disk) { Warn "can't format this one from here - use Windows' Disk Management to format it as exFAT"; return $null }
+    if ($null -eq $c.Disk) {
+        # not a disk Windows lets us partition (card reader etc.) - the person formats it with Explorer
+        Write-Host ""
+        Write-Host "  Formatting ERASES EVERYTHING on $($c.Letter):  - back up anything you want to keep." -ForegroundColor Red
+        if ($c.Letter) { $b = Backup-Vault "$($c.Letter):\"; if ($b) { $script:VaultBackup = $b } }
+        Info "Format it in File Explorer: right-click $($c.Letter): > Format... > File system exFAT > Start."
+        return (Wait-LainReady $null $c.Letter)
+    }
     $d = Get-Disk -Number $c.Disk
     if ($d.IsBoot -or $d.IsSystem) { Die "refusing: that's the disk Windows runs from" }
     Show-Contents $d
@@ -184,25 +256,34 @@ function Format-LainDisk($c) {
         $b = Backup-Vault "$($p.DriveLetter):\"; if ($b) { $script:VaultBackup = $b }
     }
     $n = $d.Number
+    # The partition is created WITHOUT a drive letter and formatted before it gets one, so Windows
+    # usually doesn't pop up its "You need to format the disk" window in the middle of it.
     $code = @"
 `$d = Get-Disk -Number $n
 if (`$d.IsOffline) { Set-Disk -Number $n -IsOffline `$false }
 if (`$d.IsReadOnly) { Set-Disk -Number $n -IsReadOnly `$false }
 if (`$d.PartitionStyle -ne 'RAW') { Clear-Disk -Number $n -RemoveData -RemoveOEM -Confirm:`$false }
-Initialize-Disk -Number $n -PartitionStyle GPT -ErrorAction SilentlyContinue
-`$p = New-Partition -DiskNumber $n -UseMaximumSize -AssignDriveLetter -GptType '$MsData'
+`$d = Get-Disk -Number $n
+if (`$d.PartitionStyle -eq 'RAW') { Initialize-Disk -Number $n -PartitionStyle GPT }
+elseif (`$d.PartitionStyle -ne 'GPT') { Set-Disk -Number $n -PartitionStyle GPT }
+`$p = New-Partition -DiskNumber $n -UseMaximumSize -GptType '$MsData'
 Format-Volume -Partition `$p -FileSystem exFAT -NewFileSystemLabel LAINAI -Confirm:`$false | Out-Null
+Start-Sleep 2
+`$p = Get-Partition -DiskNumber $n -PartitionNumber `$p.PartitionNumber
+if (-not `$p.DriveLetter) { Add-PartitionAccessPath -DiskNumber $n -PartitionNumber `$p.PartitionNumber -AssignDriveLetter }
 "@
-    Info "[1/2] erasing and formatting (Windows will ask for administrator permission)..."
-    if (-not (RunElevated $code)) { Warn "formatting failed or was cancelled"; return $null }
-    Start-Sleep 2
-    Info "[2/2] checking the result..."
-    $p = Get-Partition -DiskNumber $n | Where-Object DriveLetter | Select-Object -First 1
-    if (-not $p) { Warn "formatted, but it has no drive letter yet - unplug/replug and rescan"; return $null }
-    $v = $p | Get-Volume
-    if ($v.FileSystemType -ne 'exFAT' -or $p.GptType -ne $MsData) { Warn "format check failed: $($v.FileSystemType), partition type $($p.GptType)"; return $null }
-    Ok "formatted and verified: $($p.DriveLetter):  exFAT  'LAINAI'  GPT / Microsoft basic data - readable on Windows, Linux and macOS"
-    return "$($p.DriveLetter):\"
+    Info "erasing and formatting (Windows will ask for administrator permission)..."
+    if (RunElevated $code) {
+        Start-Sleep 2
+        $st = Test-LainVolume $n $null
+        if ($st.Ready -and $st.Fs -eq 'exFAT') {
+            Ok "formatted and verified: $($st.Letter):  exFAT  '$($st.Label)' - readable on Windows, Linux and macOS"
+            Info "(if a Windows 'Format' window popped up, just close it)"
+            return "$($st.Letter):\"
+        }
+        Info "the format ran, but the drive isn't showing up as ready yet ($($st.Problem))"
+    } else { Warn "the installer's format didn't finish - you can format it with Windows instead" }
+    return (Wait-LainReady $n $null)
 }
 
 function Fix-LainTag($c) {
@@ -252,10 +333,28 @@ if ($Drive) {
         $c = $cands[[int]$a - 1]
         $Fs = "$($c.Fs)"
         $target = if ($c.Letter) { "$($c.Letter):\" } else { $null }
+        $hasLain = $target -and (Test-Path (Join-Path $target 'LainAI'))
+
+        # Already good to go? Then don't format - just confirm (formatting stays available).
+        if ($Fs -eq 'exFAT' -and $target -and -not $Format) {
+            Ok "exFAT with a drive letter - already good to go on Windows, Linux and macOS, no formatting needed"
+            if ($hasLain) { Info "Lain is already on it - this updates it; your vault and downloaded models stay" }
+            else { Info "files already on it are kept" }
+            $choice = Ask "Install onto $target ? [Y]   (f = format it anyway · b = back to the drive list)" 'y'
+            if ($choice -match '^[yY]') { $Drive = $target; break }
+            if ($choice -notmatch '^[fF]') { continue }
+            $target = Format-LainDisk $c
+            if (-not $target) { Warn "no usable drive yet - pick again"; continue }
+            $Fs = (Get-Volume -DriveLetter $target[0]).FileSystemType
+            $Drive = $target; break
+        }
+
         $keep = $true; $keepLabel = 'Keep the files and install onto it as it is'
         switch -Regex ($Fs) {
-            '^exFAT$'   { Ok "exFAT - already works on Windows, Linux and macOS" }
-            '^NTFS$'    { Warn "NTFS - works on Windows and most Linux, but exFAT is the safer cross-OS choice" }
+            '^exFAT$'   { if (-not $target) { Warn "exFAT, but it has no drive letter"; $keepLabel = 'Give it a drive letter and keep the files' }
+                          else { Ok "exFAT - already works on Windows, Linux and macOS" } }
+            '^NTFS$'    { Warn "NTFS - works on Windows and most Linux, but exFAT is the safer cross-OS choice"
+                          if (-not $target) { $keepLabel = 'Give it a drive letter and keep the files' } }
             '^FAT'      { Warn "FAT32 - can't store files over 4 GB and the models are bigger: it has to be formatted"; $keep = $false }
             '^linux-tagged$' { Warn "partition is tagged 'Linux filesystem', so Windows hides it (it may be exFAT underneath)"
                           $keepLabel = 'Fix the partition tag and keep the files (works if it is exFAT underneath)' }
@@ -266,15 +365,20 @@ if ($Drive) {
         $def = '1'
         if ($keep) {
             Write-Host "   2) $keepLabel" -ForegroundColor White
-            if (($target -and (Test-Path (Join-Path $target 'LainAI'))) -or $Fs -eq 'linux-tagged') { $def = '2' }   # existing Lain drive: update it
-            if ($Format) { $def = '1' }
+            if (-not $Format) { $def = '2' }     # usable as it is: never default to erasing it
         }
         Write-Host "   b) back to the drive list" -ForegroundColor White
         $choice = Ask "Choose [$def]" $def
-        if ($choice -eq '1') { $target = Format-LainDisk $c; if ($target) { $Fs = 'exFAT' } }
+        if ($choice -eq '1') { $target = Format-LainDisk $c }
         elseif ($choice -eq '2' -and $keep) {
-            if ($Fs -eq 'linux-tagged') { $target = Fix-LainTag $c; if ($target) { $Fs = (Get-Volume -DriveLetter $target[0]).FileSystemType } }
+            if ($Fs -eq 'linux-tagged') { $target = Fix-LainTag $c }
+            elseif (-not $target) {
+                Add-LainLetter ([pscustomobject]@{ Disk = $c.Disk; Part = $c.Part })
+                $l = (Get-Partition -DiskNumber $c.Disk -PartitionNumber $c.Part -ErrorAction SilentlyContinue).DriveLetter
+                $target = if ($l -and $l -ne [char]0) { "${l}:\" } else { Warn "it still has no drive letter - try unplugging and replugging it"; $null }
+            }
         } else { continue }
+        if ($target) { $Fs = (Get-Volume -DriveLetter $target[0] -ErrorAction SilentlyContinue).FileSystemType }
         if (-not $target) { Warn "no usable drive letter - pick again"; continue }
         $Drive = $target; break
     }
