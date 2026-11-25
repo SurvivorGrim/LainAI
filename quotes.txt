@@ -1,0 +1,12 @@
+# Lain AI - welcome screen quotes. One per line; lines starting with # are ignored.
+# Optional speaker after " — ", e.g.:  Some line. — Lain
+The network doesn't forget. It just stops asking.
+Every connection is a small act of faith.
+Somewhere between the signal and the noise, there's you.
+Offline is not alone. Offline is quiet.
+Static is just a conversation you can't hear yet.
+The wires hum even when no one is listening.
+No one is ever truly disconnected. Only unplugged.
+Even silence has a protocol.
+I'm here. I've always been here. You just logged in.
+Local. Private. Present.
