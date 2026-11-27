@@ -28,6 +28,44 @@ def clip(text, limit=MAX_RESULT):
     return head + "\n\n[... %d characters omitted ...]\n\n" % (len(text) - len(head) - len(tail)) + tail
 
 
+_SEARCHERS = {"grep", "egrep", "fgrep", "zgrep", "rg", "pgrep", "findstr", "findstr.exe"}
+
+
+def _search_last(command):
+    """Is the command's last step a search tool (grep, pgrep, rg, findstr) whose exit code 1 just means "no match"?
+    Not when && / || decide what ran: then a 1 could come from any step."""
+    if "&&" in command or "||" in command:
+        return False
+    last = re.split(r"[|;\n]", command.strip())[-1].split()
+    while last and ("=" in last[0] or last[0] in ("sudo", "command", "env", "nice")):
+        last = last[1:]
+    return bool(last) and os.path.basename(last[0].strip("'\"")).lower() in _SEARCHERS
+
+
+def _capture(argv, timeout=20):
+    """Run a short read-only helper command and return its output ("" if it isn't available)."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=timeout,
+                           stdin=subprocess.DEVNULL)
+        return r.stdout + (r.stderr if not r.stdout else "")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _count_lines(lines, limit):
+    """Duplicate lines collapsed into 'Nx line', first-seen order kept (order matters for e.g. dependency cycles)."""
+    seen = {}
+    for l in lines:
+        l = l.strip()
+        if l:
+            seen[l] = seen.get(l, 0) + 1
+    out = [("%dx " % n if n > 1 else "") + l[:300] for l, n in seen.items()]
+    return out[:limit] + (["... %d more different lines" % (len(out) - limit)] if len(out) > limit else [])
+
+
+_BOOT_TARGETS = {"default.target", "multi-user.target", "graphical.target"}
+
+
 def kill_tree(p):
     """Stop a command and everything it started (bash -c children would otherwise keep running)."""
     if IS_WIN:
@@ -138,6 +176,12 @@ class Tools:
                     {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"},
                      "max_results": {"type": "integer"}}, ["pattern"]),
             _schema("system_info", "Details about this computer: OS, CPU, RAM, GPU, disks, user, working directory.", {}),
+            _schema("service_health", "What's supposed to run but isn't: failed services, services set to start at "
+                    "boot/login that are NOT running (and whether they started at all), and this boot's warnings from "
+                    "the service manager (dependency/ordering cycles, crashes, failed starts). With name, also the full "
+                    "status, unit file and recent log lines of every service/task matching it. Use it early whenever "
+                    "something stopped working, isn't there after a reboot, or 'used to work'. Read-only.",
+                    {"name": {"type": "string", "description": "optional word to focus on, e.g. rgb, docker, nginx"}}),
             _schema("update_plan", "Keep a short checklist for any task that needs more than a couple of steps. "
                     "Call it before you start and whenever a step changes status; always send the whole list. "
                     "Exactly one step should be in_progress while you work. The user sees it (and can view it any "
@@ -397,7 +441,10 @@ class Tools:
             p.wait()
         el = time.time() - t0
         code = p.returncode
-        color = ui.OK if code == 0 and not status else ui.RED
+        nomatch = code == 1 and not status and _search_last(command)
+        if nomatch:
+            status = "no match - the search found nothing; that's an answer, not an error"
+        color = ui.OK if (code == 0 and not status) or nomatch else ui.RED
         ui.out("    " + color + "└ %s · %s · %d lines" % (status or "exit %s" % code, ui.fmt_time(el) if el >= 1 else "%.1fs" % el,
                                                          len(chunks)) + ui.R)
         note = ""
@@ -421,6 +468,9 @@ class Tools:
         elif status.startswith("stopped after"):
             note = ("\nIt hit the time limit. If it can legitimately take longer (install, build, download), run it "
                     "again with a bigger timeout; if it was waiting on something (network, input), fix that instead.")
+        if code not in (0, None) and not nomatch and "&&" in command:
+            note += ("\nNote: this command line uses &&, so every command after the one that failed did NOT run - "
+                     "their results are missing, not empty. Run independent checks separately (or join them with ;).")
         res = "exit code: %s%s\n" % (code, (" (" + status + ")") if status else "")
         return (res + clip("\n".join(chunks)) if chunks else res + "(no output)") + note
 
@@ -581,6 +631,116 @@ class Tools:
                 pass
         ui.out("    " + ui.DIM + "└ done" + ui.R)
         return "\n".join(lines)
+
+    def t_service_health(self, name=""):
+        name = str(name or "").strip()
+        with ui.Spinner("checking services and this boot's logs"):
+            text = self._health_win(name) if IS_WIN else self._health_linux(name)
+        ui.out("    " + ui.DIM + "└ done" + ui.R)
+        return text
+
+    def _health_linux(self, name):
+        if not shutil.which("systemctl"):
+            return "This system has no systemctl (not systemd) - check its init system's own tools instead."
+        rx = re.compile(re.escape(name), re.I) if name else None
+        out = []
+        props = ("Id,Description,ActiveState,SubState,Type,Result,WantedBy,ExecMainStartTimestampMonotonic,FragmentPath,"
+                 "ConditionResult,ConditionTimestampMonotonic")
+        for scope, flag in (("user services (systemctl --user, start at login)", ["--user"]),
+                            ("system services (systemctl, start at boot)", ["--system"])):
+            sc = ["systemctl"] + flag + ["--no-pager"]
+            out.append("== %s ==" % scope)
+            failed = [l.split()[0] for l in _capture(sc + ["--failed", "--no-legend", "--plain"]).splitlines() if l.split()]
+            out.append("failed: " + (", ".join(failed) if failed else "none"))
+            enabled = [l.split()[0] for l in _capture(sc + ["list-unit-files", "--state=enabled", "--type=service",
+                                                            "--no-legend"]).splitlines() if l.split()]
+            enabled = [u for u in enabled if not u.endswith("@.service")]
+            down, exited = [], []
+            for block in _capture(sc + ["show", "-p", props, "--"] + enabled).split("\n\n") if enabled else []:
+                d = dict(l.split("=", 1) for l in block.splitlines() if "=" in l)
+                if not d.get("Id") or d.get("ActiveState") in ("active", "activating", "reloading"):
+                    continue
+                if not set(d.get("WantedBy", "").split()) & _BOOT_TARGETS:
+                    continue                    # started on demand (socket, D-Bus, timer...), not at boot/login
+                ran = d.get("ExecMainStartTimestampMonotonic", "0") not in ("", "0")
+                if d.get("Type") == "oneshot" and d.get("Result") == "success" and ran:
+                    continue                    # a one-time job that ran fine
+                if d.get("ConditionResult") == "no" and d.get("ConditionTimestampMonotonic", "0") not in ("", "0"):
+                    continue                    # skipped on purpose: its start condition isn't met on this machine
+                if ran and d.get("Result") == "success":
+                    exited.append(d["Id"])      # ran and exited cleanly (often by design)
+                    continue
+                down.append("  %s - %s (%s/%s, result %s) - %s  [%s]" % (
+                    d["Id"], "NEVER STARTED this boot" if not ran else "started, then stopped",
+                    d.get("ActiveState"), d.get("SubState"), d.get("Result"), d.get("Description", ""),
+                    d.get("FragmentPath", "")))
+            out.append("enabled to start at boot/login but NOT running:" + ("\n" + "\n".join(down) if down else " none"))
+            if exited:
+                out.append("ran this boot and exited normally (usually fine): " + ", ".join(exited))
+            jr = ["journalctl"] + flag + ["-b", "--no-pager", "-o", "cat"]
+            warn = _capture(jr + ["-p", "warning", "-t", "systemd"]).splitlines()
+            warn = [l for l in warn if not l.startswith("-- ")]
+            out.append("this boot's warnings from the service manager:" +
+                       ("\n  " + "\n  ".join(_count_lines(warn, 30)) if warn else " none"))
+            if rx:
+                units = set()
+                for args in (["list-units", "--all", "--no-legend", "--plain"], ["list-unit-files", "--no-legend"]):
+                    for l in _capture(sc + args).splitlines():
+                        if l.split() and rx.search(l.split()[0]):
+                            units.add(l.split()[0])
+                units = sorted(u for u in units if not u.endswith(".mount"))[:8]
+                for u in units:
+                    out.append("-- %s --" % u)
+                    st = _capture(sc + ["status", "-n", "0", "--", u]).strip()
+                    out.append(st[:1500] or "(no status)")
+                    out.append("unit file: " + (_capture(sc + ["show", "-p", "FragmentPath,UnitFileState,WantedBy,After,"
+                                                                "Before,Requires", "--", u]).replace("\n", "; ").strip()))
+                    logs = _capture(jr + ["-n", "15", "-u", u]).splitlines()
+                    out.append("recent log lines:" + ("\n  " + "\n  ".join(_count_lines(logs, 15)) if logs else " none"))
+                lines = [l for l in _capture(jr + ["-p", "info"]).splitlines() if rx.search(l)]
+                out.append("this boot's log lines mentioning %r:" % name +
+                           ("\n  " + "\n  ".join(_count_lines(lines[-60:], 30)) if lines else " none"))
+            out.append("")
+        if not name:
+            out.append("(Tip: call again with name=... to see full status, unit files and logs of the services involved.)")
+        return "\n".join(out)
+
+    def _health_win(self, name):
+        flt = name.replace("'", "''")
+        ps = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+'== services set to start automatically but NOT running (delayed/trigger-start ones are often normal) =='
+Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' -and $_.State -ne 'Running' } |
+  ForEach-Object { '  {0} - {1} ({2}, last exit code {3})' -f $_.Name, $_.DisplayName, $_.State, $_.ExitCode }
+'== your own scheduled tasks whose last run failed =='
+Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' -and $_.State -ne 'Disabled' } | ForEach-Object {
+  $i = $_ | Get-ScheduledTaskInfo
+  if ($i.LastTaskResult -ne 0 -and $i.LastTaskResult -ne 267011) { '  {0}{1} - last result 0x{2:X} at {3}' -f $_.TaskPath, $_.TaskName, $i.LastTaskResult, $i.LastRunTime } }
+'== errors since this boot (System + Application, newest first) =='
+Get-WinEvent -FilterHashtable @{LogName='System','Application'; Level=1,2; StartTime=$boot} -MaxEvents 300 |
+  Group-Object ProviderName, Id | Select-Object -First 25 | ForEach-Object {
+    $e = $_.Group[0]; $m = ($e.Message -split "`n")[0]; if ($m.Length -gt 200) { $m = $m.Substring(0,200) }
+    '  {0}x {1} {2}: {3}' -f $_.Count, $e.ProviderName, $e.Id, $m.Trim() }
+$f = '__NAME__'
+if ($f) {
+  "== everything matching '$f' =="
+  Get-Service "*$f*" | ForEach-Object { $c = Get-CimInstance Win32_Service -Filter "Name='$($_.Name)'"
+    '  service {0} - {1}: {2}, start {3}, runs {4}' -f $_.Name, $_.DisplayName, $_.Status, $c.StartMode, $c.PathName }
+  Get-ScheduledTask | Where-Object { $_.TaskName -like "*$f*" } | ForEach-Object { $i = $_ | Get-ScheduledTaskInfo
+    '  task {0}{1}: {2}, last result 0x{3:X} at {4}' -f $_.TaskPath, $_.TaskName, $_.State, $i.LastTaskResult, $i.LastRunTime }
+  Get-CimInstance Win32_StartupCommand | Where-Object { $_.Name -like "*$f*" -or $_.Command -like "*$f*" } |
+    ForEach-Object { '  startup entry {0}: {1} ({2})' -f $_.Name, $_.Command, $_.Location }
+  Get-Process | Where-Object { $_.Name -like "*$f*" } | ForEach-Object { '  running process {0} (pid {1}) {2}' -f $_.Name, $_.Id, $_.Path }
+  Get-WinEvent -FilterHashtable @{LogName='System','Application'; StartTime=$boot} -MaxEvents 3000 |
+    Where-Object { $_.Message -like "*$f*" -or $_.ProviderName -like "*$f*" } | Select-Object -First 20 | ForEach-Object {
+      $m = ($_.Message -split "`n")[0]; if ($m.Length -gt 200) { $m = $m.Substring(0,200) }
+      '  log {0:HH:mm:ss} {1} {2}: {3}' -f $_.TimeCreated, $_.LevelDisplayName, $_.ProviderName, $m.Trim() }
+}
+""".replace("__NAME__", flt)
+        return _capture(["powershell.exe", "-NoProfile", "-Command",
+                         "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + ps], timeout=90).strip() \
+            or "Couldn't read services/event logs (PowerShell gave no output)."
 
     def t_web_search(self, query, max_results=8):
         r = web.web_search(query, max_results)

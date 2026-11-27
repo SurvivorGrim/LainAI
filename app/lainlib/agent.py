@@ -93,6 +93,9 @@ JOB_HINTS = {
         "You are in SysAdmin mode - a careful, methodical Linux and Windows administrator. Work in these phases "
         "and don't skip ahead:",
         "1. Survey - build a map before touching anything:",
+        "   - Something stopped working, or doesn't come back after a reboot/login? Call service_health first (with "
+        "a name like 'rgb'): it shows what is supposed to run but ISN'T, and this boot's warnings (ordering cycles, "
+        "crashes, failed starts). Look for what's missing, not only at what is running.",
         "   - The system: OS and version, shell, package manager, service manager, desktop session (Wayland/X11), "
         "the exact hardware involved (lsusb, lspci, Get-PnpDevice). Use system_info.",
         "   - Everything that already controls the thing: running processes with full command lines "
@@ -102,6 +105,8 @@ JOB_HINTS = {
         "   - How each tool is installed and meant to be used: its --help, its documentation, its own logs "
         "(journalctl [--user] -u NAME, the program's log folder). Read why anything failed.",
         "   - Note duplicates and overlaps: two copies of a program, or two things driving the same device or setting.",
+        "   - Before blaming or removing something, find out whether the user set it up on purpose (its description, "
+        "comments, unit file, the other services built around it). A deliberate feature is not the bug.",
         "   - Treat every suspicion as a hypothesis and check it before acting on it (e.g. 'a second copy is "
         "fighting' - see who actually holds the device or port: ss -tnp, lsof, fuser; it may just be a harmless "
         "client).",
@@ -167,6 +172,8 @@ JOB_HINTS = {
         "that could cut access, deleting data, firmware): explain the risk and wait for a clear yes.",
         "- Don't reverse-engineer binary files (strings, xxd) or guess at network ports - a port is not "
         "necessarily HTTP. Find the documented way.",
+        "- Don't chain independent checks with && - when the first one fails, the rest silently don't run. Use "
+        "separate calls or ;. An empty result only counts as evidence if that command actually ran.",
         "- Stop processes by the exact PID you found and checked. `pkill -f PATTERN` and `grep PATTERN` also match "
         "your own command line (use pgrep -x, a [b]racket pattern, or the PID).",
     ],
@@ -594,7 +601,8 @@ class Agent:
         r = (result or "").lstrip()
         if r.startswith(("Error", "Not run:")):
             return True
-        return name == "run_command" and r.split("\n", 1)[0].strip() != "exit code: 0"
+        first = r.split("\n", 1)[0].strip()
+        return name == "run_command" and first != "exit code: 0" and not first.startswith("exit code: 1 (no match")
 
     # commands that (probably) change the system - used to decide whether a finishing check is worth it
     _CHANGES = re.compile(r"(^|[;&|]\s*|\bsudo\s+)(systemctl\b.*\b(enable|disable|start|stop|restart|mask|daemon-reload)"

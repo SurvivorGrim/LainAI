@@ -4,6 +4,27 @@ Lain AI uses [semantic versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 The version lives in the `VERSION` file. Each release is a GitHub release tagged `vX.Y.Z`.
 Lain's update menu (`u`) checks the latest release and offers to install it.
 
+## 1.2.0 (2026-11-27)
+
+From a real SysAdmin test: "my RGB isn't on the Breath profile". The breathing service had been dropped at
+boot by a dependency loop. Lain blamed the (intended) GPU temperature script instead, because an `&&` chain
+hid the check that would have found it.
+
+- **New tool `service_health`** (Linux + Windows, read-only): what's supposed to run but isn't.
+  - Linux: failed services, services enabled for boot/login that are NOT running (and whether they started
+    at all this boot), and this boot's warnings from systemd: ordering cycles, crashes, failed starts. With
+    a name (e.g. `rgb`) it also shows each matching service's status, unit file ordering, recent log lines
+    and every log line of this boot that mentions it.
+  - Windows: automatic services that aren't running, your own scheduled tasks whose last run failed,
+    errors since boot, and with a name: matching services, tasks, startup entries, processes and log events.
+  - SysAdmin mode uses it first whenever something stopped working or doesn't come back after a reboot.
+- **A search that finds nothing isn't a failure.** `grep`, `pgrep`, `rg` and `findstr` exiting with 1 is
+  reported as "no match - that's an answer". This stops false "3 failed steps in a row" warnings.
+- **`&&` chains explained.** When a command line with `&&` fails, Lain is told the commands after the failing
+  one never ran: their results are missing, not empty.
+- **New SysAdmin rules:** look for what's missing, not only what's running; don't chain independent checks
+  with `&&`; before blaming or removing something, check whether the user set it up on purpose.
+
 ## 1.1.0 (2026-11-27)
 
 Fixes from real test sessions (a Windows security review and a Windows install fix).
