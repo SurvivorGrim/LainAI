@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# logs and leftovers
+logs/
+*.log
+*.part
+*.tmp
+*.bak
+*.orig
+*.rej
+*.swp
+*~
+*.lain-edit
+*.lain-bak-*
+
+# never commit drive contents: models, engines, runtimes, the encrypted vault
+models/
+engine/
+runtime/
+bin/
+vault/
+*.gguf
+*.safetensors
+*.age
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,5 +1,5 @@
-"""Check for and install updates: models, the AI engine (llama.cpp) and age.
-Every download is checksum-verified before it replaces anything; interrupted downloads resume."""
+"""Check for and install updates: Lain herself (GitHub releases), models, the AI engine (llama.cpp) and age.
+Model/engine/age downloads are checksum-verified before they replace anything; interrupted downloads resume."""
 import datetime
 import hashlib
 import io
@@ -8,8 +8,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -21,6 +23,7 @@ GH = "https://api.github.com/repos"
 HF = "https://huggingface.co"
 STALE_DAYS = 14   # only offer an engine update when it's at least this much newer
 UA = {"User-Agent": "LainAI-updater"}
+APP_REPO = "SurvivorGrim/LainAI"   # where Lain's own releases are published (tags like v1.1.0)
 
 ENGINE_PATS = {
     "win-cuda": [r"llama-b\d+-bin-win-cuda-(12\.\d+)-x64\.zip", r"cudart-llama-bin-win-cuda-(12\.\d+)-x64\.zip"],
@@ -32,8 +35,8 @@ ENGINE_PATS = {
 }
 
 
-def get_json(url):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r:
+def get_json(url, timeout=30):
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -126,8 +129,99 @@ def read_sums(sums_path):
     return out
 
 
+def parse_version(v):
+    """'v1.2.3' / '1.2' -> (1, 2, 3) / (1, 2, 0); anything else -> None."""
+    m = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.(\d+))?", (v or "").strip())
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def app_version(root):
+    try:
+        return open(os.path.join(root, "VERSION"), encoding="utf-8").read().strip() or "none"
+    except OSError:
+        return "none"
+
+
+def check_app(root, timeout=30):
+    """Newest Lain release on GitHub, if it's newer than this drive's VERSION."""
+    cur = app_version(root)
+    try:
+        rel = get_json("%s/%s/releases/latest" % (GH, APP_REPO), timeout)
+        tag, notes = rel["tag_name"], (rel.get("body") or "").strip()
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        tags = get_json("%s/%s/tags?per_page=100" % (GH, APP_REPO), timeout)   # no releases yet: use plain tags
+        tags = [t["name"] for t in tags if parse_version(t["name"])]
+        if not tags:
+            return None
+        tag, notes = max(tags, key=parse_version), ""
+    new = parse_version(tag)
+    if not new or (parse_version(cur) and new <= parse_version(cur)):
+        return None
+    return {"kind": "app", "label": "Lain    app", "detail": "%s -> %s" % (cur, tag.lstrip("v")), "bytes": 0,
+            "tag": tag, "notes": notes, "url": "https://github.com/%s/archive/refs/tags/%s.zip" % (APP_REPO, tag)}
+
+
+def _install_app(root, it, tmp):
+    """Download the release, check it, then let ITS installer copy the program files (--app-only)."""
+    ui.out()
+    ui.hi("Lain %s" % it["tag"])
+    if it.get("notes"):
+        for l in it["notes"].splitlines()[:15]:
+            ui.say(l.rstrip()[:100])
+    arch = os.path.join(tmp, "lain-%s.zip" % it["tag"])
+    try:
+        with ui.Spinner("downloading Lain %s from GitHub" % it["tag"]) as sp:
+            with urllib.request.urlopen(urllib.request.Request(it["url"], headers=UA), timeout=60) as r, open(arch, "wb") as f:
+                n = 0
+                for b in iter(lambda: r.read(1 << 16), b""):
+                    f.write(b)
+                    n += len(b)
+                    sp.detail = ui.human(n)
+        src = os.path.join(tmp, "lain-src")
+        with zipfile.ZipFile(arch) as z:
+            for m in z.namelist():
+                if m.startswith("/") or ".." in m.replace("\\", "/").split("/"):
+                    raise ValueError("unsafe path in archive: %s" % m)
+            z.extractall(src)
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
+        ui.red("Lain update failed to download: %s - nothing was changed." % e)
+        return False
+    tops = os.listdir(src)
+    top = os.path.join(src, tops[0]) if len(tops) == 1 else src
+    inst = os.path.join(top, "installer", "lain_install.py")
+    got = parse_version(open(os.path.join(top, "VERSION"), encoding="utf-8").read()) \
+        if os.path.isfile(os.path.join(top, "VERSION")) else None
+    if not os.path.isfile(inst) or not os.path.isfile(os.path.join(top, "app", "lain.py")) or got != parse_version(it["tag"]):
+        ui.red("That release doesn't look like a complete Lain %s - nothing was changed." % it["tag"])
+        return False
+    for dp, _, fs in os.walk(top):          # every Python file must at least compile before anything is replaced
+        for fn in fs:
+            if fn.endswith(".py"):
+                try:
+                    compile(open(os.path.join(dp, fn), encoding="utf-8").read(), fn, "exec")
+                except (SyntaxError, ValueError, UnicodeDecodeError) as e:
+                    ui.red("Release file %s is broken (%s) - nothing was changed." % (fn, e))
+                    return False
+    drive = os.path.dirname(os.path.abspath(root))
+    r = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", inst, "--drive", drive, "--app-only"])
+    if r.returncode != 0:
+        ui.red("Installing Lain %s failed (code %s)." % (it["tag"], r.returncode))
+        return False
+    ui.grn("Lain %s installed. Restart Lain to use it." % it["tag"].lstrip("v"))
+    return True
+
+
 def check(root):
     items = []
+    try:
+        with ui.Spinner("checking for a new Lain version on GitHub"):
+            app = check_app(root)
+        if app:
+            items.append(app)
+    except (OSError, ValueError, KeyError) as e:
+        ui.say("Lain app: couldn't check GitHub right now (%s)." % e)
     models_dir = os.path.join(root, "models")
     sums_path = os.path.join(models_dir, "SHA256SUMS")
     sums = read_sums(sums_path)
@@ -239,10 +333,11 @@ def run(root):
     ui.out()
     if not items:
         ui.grn("Everything is up to date.  (^_^)")
-        ui.say("engine %s  |  age %s  |  all installed models match upstream" % (cur, cur_age))
+        ui.say("Lain %s  |  engine %s  |  age %s  |  all installed models match upstream" % (app_version(root), cur, cur_age))
         return
     ui.hi("Updates available:")
-    ui.center_block(["  %-26s %-30s %9s" % (i["label"], i["detail"], ui.human(i["bytes"])) for i in items])
+    ui.center_block(["  %-26s %-30s %9s" % (i["label"], i["detail"], ui.human(i["bytes"]) if i["bytes"] else "")
+                     for i in items])
     ui.out()
     ui.say("total " + ui.human(sum(i["bytes"] for i in items)))
     ans = ui.ask("Download all [Y], choose one by one [c], or skip [n]? ", 70).strip().lower()
@@ -251,12 +346,17 @@ def run(root):
         return
     choose = ans.startswith("c")
     tmp = tempfile.mkdtemp(prefix="lainai-update-")
-    failed = False
+    failed = app_done = False
     try:
         for it in items:
-            if choose and ui.ask("Update %s (%s, %s)? [Y/n] " % (" ".join(it["label"].split()), it["detail"], ui.human(it["bytes"])), 70).strip().lower().startswith("n"):
+            if choose and ui.ask("Update %s (%s%s)? [Y/n] " % (" ".join(it["label"].split()), it["detail"],
+                                                                ", " + ui.human(it["bytes"]) if it["bytes"] else ""), 70).strip().lower().startswith("n"):
                 continue
-            if it["kind"] == "model":
+            if it["kind"] == "app":
+                ok = _install_app(root, it, tmp)
+                app_done |= ok
+                failed |= not ok
+            elif it["kind"] == "model":
                 ok = download("%s/%s/resolve/main/%s" % (HF, it["repo"], it["file"]), os.path.join(root, "models", it["file"]),
                               it["sha"], it["bytes"], "%s - %s" % (" ".join(it["label"].split()), it["file"]))
                 if ok:
@@ -273,6 +373,8 @@ def run(root):
         ui.red("Some updates didn't finish - run the update again to retry.")
     else:
         ui.grn("All done. Lain is up to date.  \\(^o^)/")
+    if app_done:
+        ui.say("The new version may list new models: after restarting, d downloads them and u checks again.")
 
 
 def get_models(root, wanted):
@@ -410,3 +512,54 @@ def _install_age(root, it, tmp):
         f.write(it["tag"] + "\n")
     ui.grn("\\(^o^)/  age updated to " + it["tag"])
     return True
+
+
+# ---------------------------------------------------------------- check at start
+SKIP_FILE = os.path.join("data", "skip-version")          # "s" at the start-up prompt: don't ask about it again
+OFF_FILE = os.path.join("data", "no-update-check")        # create this file to switch the start-up check off
+
+
+def startup_check(root, result):
+    """Runs in a background thread while Lain scans the hardware: one request to GitHub, a few seconds at most.
+    Puts the update item (or nothing) into result["item"]. Silent when offline."""
+    try:
+        if os.path.exists(os.path.join(root, OFF_FILE)):
+            return
+        it = check_app(root, timeout=4)
+        if not it:
+            return
+        try:
+            skipped = open(os.path.join(root, SKIP_FILE), encoding="utf-8").read().strip()
+        except OSError:
+            skipped = ""
+        if skipped and parse_version(skipped) == parse_version(it["tag"]):
+            return
+        result["item"] = it
+    except Exception:
+        pass
+
+
+def offer_update(root, it):
+    """Ask before the vault opens. Returns True when a new version was installed (caller restarts Lain)."""
+    ui.out()
+    ui.center("A newer Lain is waiting in the Wired:  v%s  ->  v%s" % (app_version(root), it["tag"].lstrip("v")), ui.HI)
+    for l in (it.get("notes") or "").splitlines()[:6]:
+        if l.strip():
+            ui.center(l.strip()[:90], ui.DIM)
+    ui.out()
+    a = ui.ask("Update now? [y]es / [n]ot now / [s]kip this version ", 70, fresh=True).strip().lower()
+    if a.startswith("s"):
+        try:
+            with open(os.path.join(root, SKIP_FILE), "w", encoding="utf-8", newline="\n") as f:
+                f.write(it["tag"] + "\n")
+        except OSError:
+            pass
+        ui.say("Skipped. Menu u still offers it any time.")
+        return False
+    if not a.startswith("y"):
+        return False
+    tmp = tempfile.mkdtemp(prefix="lainai-update-")
+    try:
+        return _install_app(root, it, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

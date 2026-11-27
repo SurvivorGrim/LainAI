@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from . import ui
-from .engine import _free_port, _IoReader
+from .engine import _free_port, _IoReader, detached
 
 IS_WIN = os.name == "nt"
 
@@ -104,7 +104,7 @@ class ImageEngine:
             env["LD_LIBRARY_PATH"] = self.dir + os.pathsep + env.get("LD_LIBRARY_PATH", "")
         self.log = open(self.log_path, "w", encoding="utf-8", errors="replace")
         self.proc = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT, env=env, cwd=self.dir,
-                                     creationflags=0x08000000 if IS_WIN else 0)
+                                     **detached())
         self.total = sum(os.path.getsize(f) for f in (diff, llm, vae))
 
     def _get(self, path, timeout=5):

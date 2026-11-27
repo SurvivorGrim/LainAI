@@ -59,6 +59,21 @@ _STAGES = [
 ]
 _OFFLOAD = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
 _BUF = re.compile(r"(\S+) (?:model )?buffer size\s*=\s*([\d.]+) MiB")
+def detached():
+    """Popen options that keep an engine out of the terminal's Ctrl+C (Ctrl+C is Lain's brake, not a reason to
+    unload a model that took minutes to read). On Linux the engine still dies with Lain (parent-death signal)."""
+    if IS_WIN:
+        return {"creationflags": 0x08000000 | 0x00000200}   # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+
+    def _die_with_parent():
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, 15)   # PR_SET_PDEATHSIG, SIGTERM
+        except Exception:
+            pass
+    return {"start_new_session": True, "preexec_fn": _die_with_parent}
+
+
 _NCTX = re.compile(r"n_ctx\s*=\s*(\d+)")
 _DEV = re.compile(r"Device \d+: ([^,]+), compute capability")
 _ERR = re.compile(r"error|failed|out of memory|unable to|cannot", re.I)
@@ -109,7 +124,7 @@ class Engine:
             env["LD_LIBRARY_PATH"] = self.dir + os.pathsep + env.get("LD_LIBRARY_PATH", "")
         self.log = open(self.log_path, "w", encoding="utf-8", errors="replace")
         self.proc = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT, env=env, cwd=self.dir,
-                                     creationflags=0x08000000 if IS_WIN else 0)
+                                     **detached())
         self.model_path = model_path
         self.model_size = os.path.getsize(model_path)
         self.model_size += os.path.getsize(mmproj) if mmproj else 0

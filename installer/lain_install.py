@@ -2,7 +2,7 @@
 
 Started by install.sh (Linux) or install.ps1 (Windows) with the bundled portable Python.
 Run it directly only if you know what you're doing:
-    python3 installer/lain_install.py --drive /media/you/LAINAI [--models all|recommended|best,mid,laptop|none] [--yes]
+    python3 installer/lain_install.py --drive /media/you/LAINAI [--models all|recommended|best,mid,laptop,alt|none] [--yes]
 
 Safe to re-run: finished pieces are skipped (checksum-verified), partial downloads resume,
 and your vault (vault/) is never touched.
@@ -508,20 +508,29 @@ def install_age(lain, tmp, force):
 
 
 def install_app(drive, lain):
+    """Copy Lain's program files onto the drive. Also used by Lain's own updater (--app-only) with the files
+    of a newer release, so the new release decides what gets copied."""
     app = os.path.join(lain, "app")
-    if os.path.isdir(app):
-        info("replacing the old app/ folder (your vault, models and settings are not in it)")
-        shutil.rmtree(app, ignore_errors=True)
-    os.makedirs(os.path.join(app, "lainlib"))
+    new, old = app + ".new", app + ".old"
+    shutil.rmtree(new, ignore_errors=True)
+    os.makedirs(os.path.join(new, "lainlib"))
     files = [("app/lain.py", "app/lain.py")]
     files += [("app/lainlib/" + f, "app/lainlib/" + f) for f in sorted(os.listdir(os.path.join(REPO, "app", "lainlib"))) if f.endswith(".py")]
-    files += [(f, f) for f in ("models.conf", "images.conf", "README.txt", "Lain.bat")]
-    files += [("data/wordlist.txt", "data/wordlist.txt"), ("data/common-words.txt", "data/common-words.txt")]
-    keep = [("quotes.txt", "quotes.txt"), ("art/splash.txt", "art/splash.txt")]
-    for src, dst in files:
+    for src, dst in files:              # stage the new app/ next to the old one ...
+        shutil.copyfile(os.path.join(REPO, src), os.path.join(new, dst[len("app/"):]))
+    if os.path.isdir(app):
+        info("replacing the old app/ folder (your vault, models and settings are not in it)")
+        shutil.rmtree(old, ignore_errors=True)
+        os.replace(app, old)
+    os.replace(new, app)                # ... then swap, so a failed copy never leaves half an app
+    shutil.rmtree(old, ignore_errors=True)
+    other = [(f, f) for f in ("VERSION", "models.conf", "images.conf", "README.txt", "Lain.bat")]
+    other += [("data/wordlist.txt", "data/wordlist.txt"), ("data/common-words.txt", "data/common-words.txt")]
+    for src, dst in other:
         os.makedirs(os.path.dirname(os.path.join(lain, dst)), exist_ok=True)
         shutil.copyfile(os.path.join(REPO, src), os.path.join(lain, dst))
-    info("%d program files copied" % len(files))
+    info("%d program files copied (version %s)" % (len(files) + len(other), open_text(os.path.join(REPO, "VERSION")) or "?"))
+    keep = [("quotes.txt", "quotes.txt"), ("art/splash.txt", "art/splash.txt")]
     for src, dst in keep:
         if os.path.exists(os.path.join(lain, dst)):
             info("kept your own %s" % dst)
@@ -573,7 +582,7 @@ def choose_models(args, rows, files, lain, h):
     gb = lambda sel: sum(files[k].get("bytes", 0) for k in sel)
     todo = lambda sel: [k for k in sel if not os.path.exists(os.path.join(md, k))]
     every = [k for k in files if not files[k].get("missing")]
-    by_tier = {t: [k for k in every if any(r["tier"] == t for r in files[k]["rows"])] for t in models.SIZES}
+    by_tier = {t: [k for k in every if any(r["tier"] == t for r in files[k]["rows"])] for t in models.TIERS}
     hh = dict(h, gpu_usable=max(0.0, h["vram_total"] - 0.8)) if h["gpus"] else h   # judge by the card, not what's free right now
     p = models.plan(models.load_conf(os.path.join(REPO, "models.conf")), hh, md) + \
         models.plan_images(models.load_images(os.path.join(REPO, "images.conf")), hh, md)
@@ -585,15 +594,16 @@ def choose_models(args, rows, files, lain, h):
                 if local not in rec and local in every:
                     rec.append(local)
 
-    say("Models Lain can use (Best = 12 GB+ graphics card, Mid = 6-8 GB card or 16 GB RAM, Laptop = anything):")
-    for t in models.SIZES:
+    say("Models Lain can use (Best = 12 GB+ graphics card, Mid = 6-8 GB card or 16 GB RAM, Laptop = anything,")
+    say("Alt = optional second-opinion models):")
+    for t in models.TIERS:
         names = sorted({"%s %s" % (r["job"], r["name"]) for k in by_tier[t] for r in files[k]["rows"] if r["tier"] == t})
         info("  %-7s %8s  %s" % (t, ui.human(gb(by_tier[t])), ", ".join(names)))
     ui.out()
     free = shutil.disk_usage(lain).free
     opts = [("1", "Everything (all jobs, all sizes)", every),
             ("2", "Recommended for THIS computer (%s)" % h["gpu_name"], rec),
-            ("3", "Pick sizes (Best / Mid / Laptop)", None),
+            ("3", "Pick sizes (Best / Mid / Laptop / Alt)", None),
             ("4", "None for now (download later from Lain's menu: d)", [])]
     for key, label, sel in opts:
         extra = "" if sel is None else "  %s to download" % ui.human(gb(todo(sel)))
@@ -617,9 +627,9 @@ def choose_models(args, rows, files, lain, h):
             if tiers is None:
                 a = ask("Which sizes? e.g.  best mid  or  laptop  [best mid laptop]:", "best mid laptop", args.yes)
                 tiers = [x.capitalize() for x in a.replace(",", " ").split()]
-            bad = [t for t in tiers if t not in models.SIZES]
+            bad = [t for t in tiers if t not in models.TIERS]
             if bad:
-                warn("unknown size %s - use best, mid, laptop" % ", ".join(bad))
+                warn("unknown size %s - use best, mid, laptop, alt" % ", ".join(bad))
                 tiers = None
                 continue
             sel = [k for t in tiers for k in by_tier[t]]
@@ -699,7 +709,7 @@ def banner():
     except (OSError, ValueError):
         pass
     ui.out()
-    ui.center("L A I N   A I   ·   installer", ui.HI)
+    ui.center("L A I N   A I   ·   installer   ·   v%s" % (open_text(os.path.join(REPO, "VERSION")) or "?"), ui.HI)
     ui.center("portable · private · offline", ui.DIM)
     ui.out()
 
@@ -707,11 +717,12 @@ def banner():
 def main():
     ap = argparse.ArgumentParser(description="Install Lain AI onto a drive.")
     ap.add_argument("--drive", required=True, help="mount folder (Linux) or drive root like E:\\ (Windows)")
-    ap.add_argument("--models", help="all | recommended | none | comma list of sizes: best,mid,laptop")
+    ap.add_argument("--models", help="all | recommended | none | comma list of sizes: best,mid,laptop,alt")
     ap.add_argument("--yes", action="store_true", help="don't ask; use defaults")
     ap.add_argument("--force", action="store_true", help="reinstall engines/runtimes even if already present")
     ap.add_argument("--python-archive", help="(bootstrap) host Python archive already downloaded")
     ap.add_argument("--fs", default="", help="(bootstrap) filesystem type of the drive")
+    ap.add_argument("--app-only", action="store_true", help="(Lain's updater) only copy the program files")
     args = ap.parse_args()
 
     drive = os.path.abspath(args.drive)
@@ -719,6 +730,12 @@ def main():
     if sys.version_info < (3, 9):
         print("Python 3.9+ needed")
         return 1
+    if args.app_only:
+        if not os.path.isdir(lain):
+            err("no Lain install on %s" % drive)
+            return 1
+        install_app(drive, lain)
+        return 0
     banner()
     if not os.path.isdir(drive):
         err("drive folder not found: %s" % drive)

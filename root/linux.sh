@@ -27,4 +27,4 @@ if ! "$PY" -c pass 2>/dev/null; then
     echo "Lain needs Python: the bundled copy couldn't run and none is installed."; exit 1
   fi
 fi
-exec "$PY" -I -X utf8 "$L/app/lain.py" "$@"
+exec "$PY" -I -B -X utf8 "$L/app/lain.py" "$@"

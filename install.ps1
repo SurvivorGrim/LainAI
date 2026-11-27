@@ -1,7 +1,7 @@
 ﻿<#
   Lain AI installer for Windows.
     Double-click install.bat   (or:  powershell -ExecutionPolicy Bypass -File install.ps1)
-    Options:  -Drive E:\   -Models all|recommended|none|best,mid,laptop   -Yes   -NoDeps   -Format   -RestoreVault C:\path\to\backup
+    Options:  -Drive E:\   -Models all|recommended|none|best,mid,laptop,alt   -Yes   -NoDeps   -Format   -RestoreVault C:\path\to\backup
     -Format preselects "format the drive" (you still type ERASE). Without it, a drive that is already
     usable (exFAT/NTFS with a drive letter) is never formatted unless you choose to.
   What it does:
@@ -434,7 +434,7 @@ Ok "ready"
 # ------------------------------------------------------------------ 4. hand over
 Step "Installing Lain onto the drive"
 $pyDrive = if ($Drive -match '^[a-zA-Z]:\\$') { $Drive } else { $Drive.TrimEnd('\') }   # "C:\x y\" would break quoting
-$pyArgs = @('-I', '-X', 'utf8', (Join-Path $Here 'installer\lain_install.py'), '--drive', $pyDrive, '--python-archive', $arch)
+$pyArgs = @('-I', '-B', '-X', 'utf8', (Join-Path $Here 'installer\lain_install.py'), '--drive', $pyDrive, '--python-archive', $arch)
 if ($Fs)     { $pyArgs += @('--fs', $Fs) }            # Windows PowerShell drops empty arguments
 if ($Models) { $pyArgs += @('--models', $Models) }
 if ($Yes)    { $pyArgs += '--yes' }

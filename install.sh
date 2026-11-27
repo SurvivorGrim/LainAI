@@ -306,7 +306,7 @@ ok "ready"
 # ------------------------------------------------------------------ 4. hand over
 step "Installing Lain onto the drive"
 set +e
-"$PY" -I -X utf8 "$HERE/installer/lain_install.py" --drive "$DRIVE" --fs "${SEL_FS:-}" --python-archive "$CACHE/$PY_FILE" "${PASS[@]}"
+"$PY" -I -B -X utf8 "$HERE/installer/lain_install.py" --drive "$DRIVE" --fs "${SEL_FS:-}" --python-archive "$CACHE/$PY_FILE" "${PASS[@]}"
 RC=$?
 set -e
 

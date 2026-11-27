@@ -1,12 +1,14 @@
-"""Model table (models.conf): three jobs x three machine sizes, and choosing what runs best here."""
+"""Model table (models.conf): jobs x machine sizes, and choosing what runs best here."""
 import os
 
 SPEED_RANK = {"fast": 2, "ok": 1, "slow": 0}
 JOBS = [("Coding", "write, fix and run code"),
+        ("SysAdmin", "set up, fix and look after your machines"),
         ("Research", "dig into questions, search the web, reason it out"),
         ("Vision", "look at screenshots, photos, charts and documents"),
         ("Image", "create pictures from a description")]
 SIZES = ["Best", "Mid", "Laptop"]
+TIERS = SIZES + ["Alt"]  # Alt = optional second-opinion model: listed, never auto-recommended
 MMPROJ_GB = 0.9          # vision add-on, loaded next to the model
 
 
@@ -154,8 +156,8 @@ def _best(cands):
 
 def recommend_job(p, job, include_missing=False):
     """Best size for this job on this machine (Best before Mid before Laptop)."""
-    rows = [v for v in p if v["job"] == job and (include_missing or v["present"])]
-    rows.sort(key=lambda v: SIZES.index(v["tier"]) if v["tier"] in SIZES else 9)
+    rows = [v for v in p if v["job"] == job and v["tier"] in SIZES and (include_missing or v["present"])]
+    rows.sort(key=lambda v: SIZES.index(v["tier"]))
     if job == "Image" and rows and not any(v["fits"] and v["speed"] != "slow" for v in rows):
         fitting = [v for v in rows if v["fits"]] or rows
         return min(fitting, key=lambda v: v["size"])      # CPU drawing: the lightest model is the only sane choice

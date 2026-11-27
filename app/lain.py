@@ -2,6 +2,7 @@
 import datetime
 import os
 import random
+import re
 import signal
 import sys
 import textwrap
@@ -18,6 +19,17 @@ COMMON = os.path.join(ROOT, "data", "common-words.txt")
 WORDLIST = os.path.join(ROOT, "data", "wordlist.txt")
 
 
+GOODBYES = ["...i'll still be here.", "logging off. not gone.", "the Wired goes quiet.",
+            "see you on the other side of the screen.", "disconnected. for now."]
+
+
+def version():
+    try:
+        return open(os.path.join(ROOT, "VERSION"), encoding="utf-8").read().strip() or "?"
+    except OSError:
+        return "?"
+
+
 def splash():
     ui.clear()
     ui.out()
@@ -29,6 +41,7 @@ def splash():
     ui.out()
     ui.hi("L A I N   A I")
     ui.say("Local Artificial Intelligence Network")
+    ui.center("v" + version(), ui.DIM)
     ui.out()
 
 
@@ -51,16 +64,15 @@ def scan_hardware():
     return h, plan, rec
 
 
-def how_it_runs(v, h):
-    if v["type"] == "diffusion":
-        return "on the GPU" if v.get("img_gpu") else "on the CPU, minutes per picture"
-    if v["type"] == "moe":
-        return "GPU + RAM, fast" if v["speed"] == "fast" else "CPU + RAM, moderate"
-    if v["speed"] == "fast":
-        return "fully on the GPU"
-    if h["gpus"]:
-        return "%d%% on GPU%s" % (v["gpu_frac"] * 100, ", slow" if v["speed"] == "slow" else "")
-    return "on the CPU"
+def quant(v):
+    """Compression level from the file name, e.g. Q4_K_XL, IQ3_XXS, Q8_0."""
+    m = re.search(r"((?:I?Q\d[\w]*|MXFP4\w*|BF16|F16))\.(?:gguf|safetensors)$", v["file"], re.I)
+    return m.group(1) if m else ""
+
+
+def disk_gb(v):
+    """Everything this choice loads: model + vision add-on or text encoder."""
+    return v["size"] + v.get("enc_size", 0) + (models.MMPROJ_GB if v.get("mmproj") else 0)
 
 
 def stray_engines():
@@ -228,7 +240,7 @@ def open_vault(v):
 
 
 # ---------------------------------------------------------------- welcome + menu
-def welcome():
+def welcome(h=None):
     ui.clear()
     ui.out()
     try:
@@ -248,13 +260,27 @@ def welcome():
                      "Present Time: " + now.strftime("%I:%M %p %Z").lstrip("0")], ui.HI)
     ui.out()
     ui.hi("What would you like to do today?")
+    if h:
+        for l in memory_lines(h):
+            ui.center(l, ui.DIM)
     ui.out()
+
+
+def memory_lines(h):
+    """Fast video memory vs slower system RAM - what decides which model size runs well here."""
+    if h.get("gpus") and h.get("vram_total"):
+        gpu = "Graphics memory (fast): %.1f GB, %.1f GB free" % (h["vram_total"], h.get("vram_free", 0))
+    else:
+        gpu = "Graphics memory (fast): none usable - models run on the CPU"
+    ram = "System RAM (slower): %.0f GB, ~%.0f GB usable" % (h.get("ram", 0), h.get("ram_usable", 0))
+    return [gpu + "   ·   " + ram,
+            "Models that fit in graphics memory run fastest; bigger ones spill into system RAM and slow down."]
 
 
 def menu(h, plan, rec):
     from lainlib import updater
     while True:
-        welcome()
+        welcome(h)
         recs = models.recommendations(plan)
         numbered, lines, default = [], [], None
         for job, what in models.JOBS:
@@ -263,38 +289,40 @@ def menu(h, plan, rec):
                 continue
             lines.append("%s%-9s%s %s%s%s" % (ui.HI, job.upper(), ui.R, ui.DIM, what, ui.R))
             for v in rows:
+                model = ("%s %s" % (v["name"], quant(v))).strip()
                 if not v["present"]:
-                    lines.append("%s      %-7s %-16s not on this drive (d to download)%s" % (ui.DIM, v["tier"], v["name"], ui.R))
+                    lines.append("%s      %-7s %-26s %5.1f GB  not on this drive (d to download)%s" % (
+                        ui.DIM, v["tier"], model, disk_gb(v), ui.R))
                     continue
                 numbered.append(v)
                 i = len(numbered)
                 if not v["fits"]:
                     tag = ui.WARN + "too big here (~%d GB)" % v["need"] + ui.R
                 elif recs.get(job) is v:
-                    tag = ui.OK + "* recommended" + ui.R + ui.DIM + " (%s)" % how_it_runs(v, h) + ui.R
+                    tag = ui.OK + "recommended" + ui.R
                     if default is None:
                         default = i
                 elif v["speed"] == "slow":
                     tag = ui.DIM + "slower here" + ui.R
                 else:
                     tag = ""
-                lines.append("  %2d) %-7s %-16s %-34s %s" % (i, v["tier"], v["name"], v["desc"][:34], tag))
+                lines.append("  %2d) %-7s %-26s %5.1f GB  %-29s %s" % (i, v["tier"], model, disk_gb(v), v["desc"][:29], tag))
             lines.append("")
         default = default or 1
         missing = models.missing_for_machine(plan)
         all_missing = [v for v in plan if not v["present"]]
-        keys = "  c/r/v/i) recommended Coding / Research / Vision / Image"
+        keys = "  c/s/r/v/i) recommended Coding / SysAdmin / Research / Vision / Image"
         lines += [keys]
         if missing:
             lines.append("  d) Download what this machine needs: " + ", ".join(sorted({m["name"] for m in missing})))
         elif all_missing:
             lines.append("  d) Download the other sizes (for using this drive on other machines)")
-        lines += ["  u) Check for updates", "  q) Disconnect"]
+        lines += ["  u) Check for updates (Lain v%s, models, engine)" % version(), "  q) Disconnect"]
         ui.center_block(lines)
         ui.out()
         if not numbered:
             ui.red("No models on this drive yet - choose d to download them.")
-        c = ui.ask("> [%d] " % default, 70).strip().lower()
+        c = ui.ask("> [%d] " % default, 70, fresh=True).strip().lower()
         if c.startswith("q"):
             return None, False
         if c.startswith("u") or c.startswith("d"):
@@ -309,7 +337,7 @@ def menu(h, plan, rec):
             continue
         if not numbered:
             continue
-        jobkey = {"c": "Coding", "r": "Research", "v": "Vision", "i": "Image"}.get(c[:1])
+        jobkey = {"c": "Coding", "s": "SysAdmin", "r": "Research", "v": "Vision", "i": "Image"}.get(c[:1])
         if jobkey:
             pick = recs.get(jobkey)
             if not pick:
@@ -318,8 +346,12 @@ def menu(h, plan, rec):
                 continue
         elif c.isdigit() and 1 <= int(c) <= len(numbered):
             pick = numbered[int(c) - 1]
-        else:
-            pick = numbered[default - 1]
+        elif not c:
+            pick = numbered[default - 1]          # Enter = the recommended choice
+        else:                                     # never start a long model load on input we didn't understand
+            ui.red("Didn't understand %r - type a number, c/s/r/v/i, d, u or q." % c)
+            time.sleep(2)
+            continue
         if not pick["fits"]:
             ui.center("%s needs ~%d GB but this machine has ~%d GB usable. It may crawl or fail."
                       % (pick["name"], pick["need"], h["gpu_usable"] + h["ram_usable"]), ui.WARN)
@@ -327,18 +359,30 @@ def menu(h, plan, rec):
                 continue
         if pick["job"] == "Image":
             online = False                      # image studio never goes online
-        elif pick["job"] == "Research":
-            online = not ui.ask("Connect to the Wired for web research? [Y/n] ", 70).strip().lower().startswith("n")
         else:
-            online = ui.ask("Connect to the Wired for web research? [y/N] ", 70).strip().lower().startswith("y")
+            while True:
+                a = ui.ask("Connect to the Wired for online access? [y/n] ", 70).strip().lower()
+                if a[:1] in ("y", "n"):
+                    break
+            online = a.startswith("y")
         return pick, online
 
 
 # ---------------------------------------------------------------- main
+def relaunch():
+    """Start the (new) Lain fresh - used after an update."""
+    args = [sys.executable, "-I", "-B", "-X", "utf8", os.path.abspath(__file__)] + sys.argv[1:]
+    sys.stdout.flush()
+    if os.name == "nt":
+        import subprocess
+        sys.exit(subprocess.call(args))
+    os.execv(sys.executable, args)
+
+
 def restart_self(state):
     """/reboot: start a fresh copy of Lain (new code) that picks up the open vault and the conversation."""
     os.environ["LAIN_REBOOT"] = state
-    args = [sys.executable, "-I", "-X", "utf8", os.path.abspath(__file__)] + sys.argv[1:]
+    args = [sys.executable, "-I", "-B", "-X", "utf8", os.path.abspath(__file__)] + sys.argv[1:]
     sys.stdout.flush()
     if os.name == "nt":
         import subprocess
@@ -350,8 +394,20 @@ def main():
     ui.title("Lain AI")
     reboot_in = os.environ.pop("LAIN_REBOOT", "")      # set by /reboot: model key|online|session file
     splash()
+    upd, upd_thread = {}, None
+    if not reboot_in:                                   # quick look for a newer Lain while the hardware scan runs
+        import threading
+        from lainlib import updater
+        upd_thread = threading.Thread(target=updater.startup_check, args=(ROOT, upd), daemon=True)
+        upd_thread.start()
     stop_strays()
     h, plan, rec = scan_hardware()
+    if upd_thread:
+        upd_thread.join(5)
+        if upd.get("item") and updater.offer_update(ROOT, upd["item"]):
+            ui.grn("Restarting into the new version...")
+            relaunch()
+            return
     try:
         v = Vault(ROOT)
     except VaultError as e:
@@ -403,7 +459,11 @@ def main():
         tools = Tools(os.path.expanduser("~"), v.files_dir(), online, h)
         tools.vision = bool(pick["mmproj_path"])
         tools.engine_pid = engine.proc.pid
-        tools.protected = [os.path.realpath(os.path.join(ROOT, d)) for d in ("app", "engine", "models", "runtime")]
+        # Lain's own live install: everything except the vault and logs (the vault is open in RAM elsewhere)
+        tools.protected = [os.path.realpath(os.path.join(ROOT, d)) for d in (
+            "app", "engine", "models", "runtime", "bin", "data", "models.conf", "images.conf", "VERSION",
+            "README.txt", "Lain.bat")]
+        tools.protected += [os.path.realpath(os.path.join(os.path.dirname(ROOT), f)) for f in ("linux.sh", "windows.ps1")]
         tools.protected.append(os.path.realpath(engine.dir))
         agent = Agent(engine, tools, h, pick, v, online)
         sess = os.path.join(v.sessions_dir(), os.path.basename(rb_session)) if rb_session else ""
@@ -427,6 +487,8 @@ def main():
                     sp.detail = "packing %s and encrypting it to your vault key" % ui.human(v.size())
                     v.lock(keep_open=bool(reboot_out))    # saved to the drive either way
                 ui.grn("Vault saved - restarting Lain..." if reboot_out else "Vault locked. Disconnected.")
+                if not reboot_out:
+                    ui.center(random.choice(GOODBYES), ui.DIM)
             except VaultError as e:
                 ui.red(str(e))
                 reboot_out = None

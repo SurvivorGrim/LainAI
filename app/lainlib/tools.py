@@ -17,6 +17,7 @@ from . import ui, web
 
 IS_WIN = os.name == "nt"
 MAX_RESULT = 16000
+DEFAULT_TIMEOUT = 120      # seconds; Lain passes a bigger timeout for installs/builds
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".cache", ".mypy_cache", "target", "dist", "build"}
 
 
@@ -100,10 +101,13 @@ class Tools:
         self.auto = False
         self.engine_pid = None     # set by lain.py: Lain's own engine
         self.protected = []        # set by lain.py: Lain's own app/engine/model folders
+        self.selfedit = False      # /selfedit: may write_file/edit_file change Lain's own running code?
         self.halt = False          # Ctrl+C pressed: the agent stops the whole request (emergency brake)
         self.shell = "PowerShell" if IS_WIN else "bash"
         self.vision = False        # set by lain.py when the model has its vision add-on loaded
         self.pending_images = []   # images view_image loaded; the agent shows them to the model next
+        self.plan = []             # update_plan checklist: [{"step", "status"}], shown with /plan
+        self.plan_note = ""
 
     # ------------------------------------------------------------------ schemas
     def schemas(self):
@@ -112,10 +116,11 @@ class Tools:
                     "Run a %s command on the user's computer and return its output and exit code. Each call is a "
                     "fresh shell started in the working directory (use the cwd argument to run elsewhere). "
                     "Commands that need sudo/admin will prompt the user for their password in the terminal. "
-                    "Avoid commands that wait for interactive input." % self.shell,
+                    "Every command must finish on its own: no interactive programs (editors, pagers, top/watch), "
+                    "and put limits on anything that can wait (curl --max-time 10, ping -c 3, nc -w 3, head)." % self.shell,
                     {"command": {"type": "string", "description": "the command line to run"},
                      "cwd": {"type": "string", "description": "directory to run in (default: working directory)"},
-                     "timeout": {"type": "integer", "description": "seconds before it is stopped (default 300)"}},
+                     "timeout": {"type": "integer", "description": "seconds before it is stopped (default %d; raise it, up to 3600, for installs, builds or big downloads)" % DEFAULT_TIMEOUT}},
                     ["command"]),
             _schema("read_file", "Read a text file. Returns numbered lines. Use offset/limit for big files.",
                     {"path": {"type": "string"}, "offset": {"type": "integer", "description": "first line, 1-based"},
@@ -133,6 +138,16 @@ class Tools:
                     {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"},
                      "max_results": {"type": "integer"}}, ["pattern"]),
             _schema("system_info", "Details about this computer: OS, CPU, RAM, GPU, disks, user, working directory.", {}),
+            _schema("update_plan", "Keep a short checklist for any task that needs more than a couple of steps. "
+                    "Call it before you start and whenever a step changes status; always send the whole list. "
+                    "Exactly one step should be in_progress while you work. The user sees it (and can view it any "
+                    "time with /plan). Use note for the key finding so far (e.g. the root cause).",
+                    {"steps": {"type": "array", "items": {"type": "object", "properties": {
+                        "step": {"type": "string"},
+                        "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}},
+                        "required": ["step", "status"]}},
+                     "note": {"type": "string", "description": "optional: key finding or current understanding"}},
+                    ["steps"]),
         ]
         if self.vision:
             s.append(_schema("view_image", "Look at an image file (PNG, JPEG, WebP, GIF, BMP): screenshots, photos, "
@@ -166,12 +181,24 @@ class Tools:
             return True
         return any(os.path.normcase(d) in os.path.normcase(c) for d in self.protected)
 
+    def _self_locked(self, p):
+        """write_file/edit_file on Lain's own running install while self-editing is locked -> refusal text."""
+        if self.selfedit or not self._touches_self(path=p):
+            return ""
+        ui.out("    " + ui.WARN + "refused: that's Lain's own running code - self-edit is locked (/selfedit unlocks it)" + ui.R)
+        return ("Refused: %s is part of your own LIVE install on the drive, and self-editing is locked. Don't modify "
+                "yourself. If the user wants the Lain AI project changed, work in their development copy (the git repo) "
+                "instead. Only if they really mean this running copy, tell them to type /selfedit first." % p)
+
     def _approve(self, what, force=False):
         if force:
             ui.out("    " + ui.WARN + "this touches Lain's own engine or files - asking even in auto mode" + ui.R)
+            if not self.selfedit:
+                ui.out("    " + ui.WARN + "(self-edit is locked: say no unless you want Lain to change her running copy)" + ui.R)
         if self.auto and not force:
             ui.out("    " + ui.DIM + "(auto-approved)" + ui.R)
             return True, ""
+        ui.flush_input()             # keys typed or pasted earlier must never answer this prompt
         while True:
             try:
                 a = input("    " + ui.WARN + "allow?" + ui.R + " [y]es / [n]o / [a]lways this session > ").strip().lower()
@@ -228,6 +255,38 @@ class Tools:
         except Exception as e:
             return "Error: %s: %s" % (type(e).__name__, e)
 
+    def plan_lines(self):
+        marks = {"done": (ui.OK, "✓"), "in_progress": (ui.WARN, "▸"), "pending": (ui.DIM, "○")}
+        out = []
+        for st in self.plan:
+            c, m = marks.get(st["status"], marks["pending"])
+            out.append("    " + c + m + " " + st["step"] + ui.R)
+        if self.plan_note:
+            out.append("    " + ui.DIM + "note: " + self.plan_note + ui.R)
+        return out
+
+    def plan_text(self):
+        marks = {"done": "[x]", "in_progress": "[>]", "pending": "[ ]"}
+        t = "\n".join("%s %s" % (marks.get(st["status"], "[ ]"), st["step"]) for st in self.plan)
+        return t + ("\nnote: " + self.plan_note if self.plan_note else "")
+
+    def unfinished(self):
+        return [st["step"] for st in self.plan if st["status"] != "done"]
+
+    def t_update_plan(self, steps, note=""):
+        if not isinstance(steps, list) or not steps:
+            return "Error: steps must be a non-empty list of {step, status}."
+        plan = []
+        for st in steps[:30]:
+            if not isinstance(st, dict) or not str(st.get("step", "")).strip():
+                return "Error: each step needs a 'step' text and a 'status' (pending, in_progress, done)."
+            status = st.get("status") if st.get("status") in ("pending", "in_progress", "done") else "pending"
+            plan.append({"step": str(st["step"]).strip()[:160], "status": status})
+        self.plan, self.plan_note = plan, str(note or "").strip()[:300]
+        for l in self.plan_lines():
+            ui.out(l)
+        return "[plan] Plan updated:\n" + self.plan_text()
+
     def t_view_image(self, path):
         if not self.vision:
             return "Error: this model has no vision add-on loaded. Ask the user to start Lain in a Vision mode."
@@ -248,14 +307,17 @@ class Tools:
             return args.get("url", "")
         if name == "view_image":
             return args.get("path", "")
+        if name == "update_plan":
+            st = args.get("steps") if isinstance(args.get("steps"), list) else []
+            return "%d steps, %d done" % (len(st), sum(1 for x in st if isinstance(x, dict) and x.get("status") == "done"))
         return ""
 
     # ------------------------------------------------------------------ tools
-    def t_run_command(self, command, cwd=None, timeout=300):
+    def t_run_command(self, command, cwd=None, timeout=DEFAULT_TIMEOUT):
         try:
-            timeout = max(1, min(int(timeout or 300), 3600))
+            timeout = max(1, min(int(timeout or DEFAULT_TIMEOUT), 3600))
         except (TypeError, ValueError):
-            timeout = 300
+            timeout = DEFAULT_TIMEOUT
         where = self.path(cwd) if cwd else self.cwd
         if where != self.cwd:
             ui.out("    " + ui.DIM + "in " + where + ui.R)
@@ -271,32 +333,62 @@ class Tools:
         p = subprocess.Popen(argv, cwd=where, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         chunks, shown, hidden = [], [0], [0]
         size = [0]
+        last = [time.time()]            # when the command last printed something
+        lock = threading.Lock()
+        status_on = [False]
+
+        def show(text):
+            with lock:
+                if status_on[0]:
+                    ui.clear_line()
+                    status_on[0] = False
+                ui.out(text)
 
         def pump():
             for raw in iter(p.stdout.readline, b""):
+                last[0] = time.time()
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if size[0] < 2_000_000:
                     chunks.append(line)
                     size[0] += len(line) + 1
                 if shown[0] < 80:
-                    ui.out("    " + ui.DIM + "│ " + line[: ui.cols() - 8] + ui.R)
+                    show("    " + ui.DIM + "│ " + line[: ui.cols() - 8] + ui.R)
                     shown[0] += 1
                 else:
                     hidden[0] += 1
                     if hidden[0] % 200 == 1:
-                        ui.out("    " + ui.DIM + "│ ... (output continues, %d more lines so far)" % hidden[0] + ui.R)
+                        show("    " + ui.DIM + "│ ... (output continues, %d more lines so far)" % hidden[0] + ui.R)
         th = threading.Thread(target=pump, daemon=True)
         th.start()
-        status = ""
+        status, stopped_by_user = "", False
         try:
-            p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            kill_tree(p)
-            status = "stopped after %ds timeout" % timeout
+            while True:                 # wait, and keep a live "still running" line so the user can check in
+                try:
+                    p.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                now = time.time()
+                if now - t0 >= timeout:
+                    kill_tree(p)
+                    status = "stopped after %ds time limit" % timeout
+                    break
+                quiet = now - last[0]
+                if quiet >= 5:
+                    with lock:
+                        ui.clear_line()
+                        ui.out("    %s%s running %s · no output for %s · limit %s · Ctrl+C stops it%s" % (
+                            ui.DIM, ui.SPIN[int(now) % len(ui.SPIN)], ui.fmt_time(now - t0), ui.fmt_time(quiet),
+                            ui.fmt_time(timeout), ui.R), end="")
+                        status_on[0] = True
         except KeyboardInterrupt:
             kill_tree(p)
-            self.halt = True
-            status = "stopped by the user (Ctrl+C)"
+            stopped_by_user = True
+            status = "stopped by the user"
+        with lock:
+            if status_on[0]:
+                ui.clear_line()
+                status_on[0] = False
         th.join(2)
         try:
             p.wait(5)
@@ -308,8 +400,29 @@ class Tools:
         color = ui.OK if code == 0 and not status else ui.RED
         ui.out("    " + color + "└ %s · %s · %d lines" % (status or "exit %s" % code, ui.fmt_time(el) if el >= 1 else "%.1fs" % el,
                                                          len(chunks)) + ui.R)
+        note = ""
+        if stopped_by_user:
+            # Ctrl+C on a command stops just that command; the user decides whether Lain carries on
+            ui.flush_input()
+            try:
+                a = input("    " + ui.WARN + "command stopped." + ui.R +
+                          " [Enter] let Lain carry on  ·  b = emergency brake  ·  or type a hint > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                ui.out()
+                a = "b"
+            if a.lower() in ("b", "brake", "stop", "s"):
+                self.halt = True
+            else:
+                note = ("\nThe user stopped this command because it was taking too long or looked stuck. Don't run "
+                        "it again as it was; if you need something like it, make sure it finishes on its own "
+                        "(time limits, non-interactive flags).")
+                if a:
+                    note += " The user says: " + a
+        elif status.startswith("stopped after"):
+            note = ("\nIt hit the time limit. If it can legitimately take longer (install, build, download), run it "
+                    "again with a bigger timeout; if it was waiting on something (network, input), fix that instead.")
         res = "exit code: %s%s\n" % (code, (" (" + status + ")") if status else "")
-        return res + clip("\n".join(chunks)) if chunks else res + "(no output)"
+        return (res + clip("\n".join(chunks)) if chunks else res + "(no output)") + note
 
     def t_read_file(self, path, offset=1, limit=400):
         p = self.path(path)
@@ -333,6 +446,9 @@ class Tools:
 
     def t_write_file(self, path, content):
         p = self.path(path)
+        locked = self._self_locked(p)
+        if locked:
+            return locked
         old = None
         if os.path.exists(p):
             try:
@@ -359,6 +475,9 @@ class Tools:
 
     def t_edit_file(self, path, old_text, new_text, replace_all=False):
         p = self.path(path)
+        locked = self._self_locked(p)
+        if locked:
+            return locked
         text = open(p, encoding="utf-8", errors="replace").read()
         n = text.count(old_text)
         if n == 0:
@@ -435,7 +554,12 @@ class Tools:
             if len(hits) >= max_results:
                 break
         ui.out("    " + ui.DIM + "└ %d matches in %d files scanned" % (len(hits), scanned) + ui.R)
-        return clip("\n".join(hits)) if hits else "No matches (%d files scanned)." % scanned
+        if hits:
+            return clip("\n".join(hits))
+        hint = (" No file in %s matched the name filter %r - search the parent folder or drop the filter." % (root, glob)
+                if scanned == 0 and glob else
+                " The pattern is a case-sensitive regex: try (?i) for any case, a shorter word, or a wider path/filter.")
+        return "No matches (%d files scanned)." % scanned + hint
 
     def t_system_info(self):
         h = self.hw

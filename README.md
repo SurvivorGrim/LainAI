@@ -28,6 +28,8 @@ a Windows or Linux PC and start it. Nothing gets installed on the PC, nothing go
 cloud, and your chats and files stay in an encrypted vault on the drive.
 
 - **Coding**: writes, fixes and runs code. It asks before changing anything on the machine.
+- **SysAdmin**: sets up, fixes and looks after Linux and Windows machines. It checks the system first,
+  backs up before changing things, and verifies each change.
 - **Research**: works through hard questions and can search the web if you allow it.
 - **Vision**: reads screenshots, photos, charts and documents.
 - **Image**: draws pictures from a description.
@@ -35,6 +37,10 @@ cloud, and your chats and files stay in an encrypted vault on the drive.
 Lain checks the computer's CPU, RAM and graphics card, then picks the best model size for
 each job. That's **Best** for a 12 GB+ graphics card, **Mid** for a 6–8 GB card or 16 GB of
 RAM, and **Laptop** for anything else.
+
+Each job comes with its own working instructions. Lain does only what you asked and checks each change
+worked. A loop breaker stops her from repeating failed attempts. She won't edit her own running
+copy unless you unlock it with `/selfedit`.
 
 ## Install
 
@@ -97,7 +103,7 @@ The installer:
    |---|---|---|
    | 1 Everything | all jobs, all sizes | ~100 GB |
    | 2 Recommended | the best fit for *this* computer | varies |
-   | 3 Pick sizes | e.g. only `mid laptop` | varies |
+   | 3 Pick sizes | e.g. only `mid laptop` (`alt` = optional Gemma 4 second opinion) | varies |
    | 4 None | download later from Lain's menu (`d`) | 0 |
 
 Every file is checked against its SHA-256 checksum. If a download gets interrupted, run the
@@ -108,7 +114,7 @@ Options (Linux / Windows):
 
 ```
 --drive PATH          / -Drive E:\           skip the drive picker
---models all|recommended|none|best,mid,laptop / -Models ...
+--models all|recommended|none|best,mid,laptop,alt / -Models ...
 --yes                 / -Yes                 accept defaults (formatting still needs typed ERASE)
 --format              / -Format              preselect "format the drive" (still asks for ERASE)
 --no-deps             / -NoDeps              don't install system packages
@@ -126,12 +132,18 @@ From the drive's top folder:
 The first time, you create a vault passphrase. Press Enter to get a strong generated one.
 See `LainAI/README.txt` on the drive for menus and chat commands.
 
+## Updates and versions
+
+The current version is in [`VERSION`](VERSION), and the changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
+In Lain's menu, `u` checks this repository's latest GitHub release and offers to install it. It also
+checks for newer models, the llama.cpp engine and `age`. Your vault, models, quotes and splash art are kept.
+
 ## Privacy & security
 
 - Fully offline unless you choose to connect for research. Web access blocks local-network addresses. No telemetry, no accounts.
 - The engines only listen on `127.0.0.1`, and the chat engine needs a random key for each session.
 - Vault: [age](https://github.com/FiloSottile/age) encryption (scrypt + X25519 + ChaCha20-Poly1305). The passphrase is never stored, so a lost passphrase can't be recovered.
-- Lain asks before running commands or changing files. `/auto` turns the prompts off; Ctrl+C is the emergency brake.
+- Lain asks before running commands or changing files. `/auto` turns the prompts off. Ctrl+C stops a running command, or acts as the emergency brake while she's answering. The model stays loaded either way.
 
 ## Supported systems
 
@@ -147,5 +159,5 @@ Lain AI bundles or downloads the following. Each keeps its own license:
 [age](https://github.com/FiloSottile/age) (BSD-3-Clause),
 [python-build-standalone](https://github.com/astral-sh/python-build-standalone) (Python license),
 the [EFF long wordlist](https://www.eff.org/dice) (CC BY 3.0) for passphrases.
-The models come from their Hugging Face pages (Qwen, FLUX, Z-Image and others, listed in `models.conf` / `images.conf`).
+The models come from their Hugging Face pages (Qwen, Gemma, FLUX, Z-Image and others, listed in `models.conf` / `images.conf`).
 Check each model's license before using it commercially.

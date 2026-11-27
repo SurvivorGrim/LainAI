@@ -101,9 +101,86 @@ def title(t):
     out("\033]0;" + t + "\a", end="")
 
 
-def ask(prompt, width=64):
+def flush_input():
+    """Throw away keys typed before the prompt appeared (e.g. during a long scan or load)."""
     try:
-        return input(pad(width) + prompt)
+        if os.name == "nt":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        elif sys.stdin.isatty():
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def input_waiting(wait=0.05):
+    """Is more typed/pasted text already waiting in the terminal? (A paste arrives as many lines at once.)"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            import time
+            end = time.time() + wait
+            while True:
+                if msvcrt.kbhit():
+                    return True
+                if time.time() >= end:
+                    return False
+                time.sleep(0.01)
+        if not sys.stdin.isatty():
+            return False
+        import select
+        return bool(select.select([sys.stdin], [], [], wait)[0])
+    except Exception:
+        return False
+
+
+def read_pasted(first, prompt=""):
+    """Collect the rest of a multi-line paste that arrived together with `first` (instead of one message per line)."""
+    lines = [first]
+    if os.name == "nt":
+        # read only the characters already waiting (never blocks, even if the console left a stray key event)
+        try:
+            import msvcrt
+            buf = []
+            while len(buf) < 2_000_000 and input_waiting():
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):          # arrow/function key: skip its second half
+                    msvcrt.getwch()
+                    continue
+                if ch == "\x03":                    # Ctrl+C
+                    break
+                buf.append(ch)
+        except Exception:
+            return lines
+        text = "".join(buf).replace("\r\n", "\n").replace("\r", "\n")
+        if text.strip():
+            out(text.rstrip("\n"))                  # getwch doesn't echo: show what arrived
+            lines += text.rstrip("\n").split("\n")
+        return lines
+    while len(lines) < 5000 and input_waiting():
+        try:
+            lines.append(input(prompt))
+        except (EOFError, KeyboardInterrupt):
+            break
+    return lines
+
+
+_KEYS = re.compile(r"\033(\[[0-9;?]*[A-Za-z~]|O[A-Za-z]|.)?")
+
+
+def clean_input(text):
+    """Remove arrow keys / other escape sequences and control characters a terminal can slip into a line."""
+    text = _KEYS.sub("", text or "")
+    return "".join(ch for ch in text if (ch >= " " and ch != "\x7f") or ch == "\t")
+
+
+def ask(prompt, width=64, fresh=False):
+    if fresh:
+        flush_input()
+    try:
+        return clean_input(input(pad(width) + prompt))
     except EOFError:
         return ""
 
