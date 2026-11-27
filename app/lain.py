@@ -403,7 +403,7 @@ def main():
     stop_strays()
     h, plan, rec = scan_hardware()
     if upd_thread:
-        upd_thread.join(5)
+        upd_thread.join(10)                         # usually done long before: the scan takes longer
         if upd.get("item") and updater.offer_update(ROOT, upd["item"]):
             ui.grn("Restarting into the new version...")
             relaunch()

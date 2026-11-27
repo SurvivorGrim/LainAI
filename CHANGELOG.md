@@ -37,6 +37,10 @@ Fixes from real test sessions (a Windows security review and a Windows install f
   - no re-running look-ups she already has the output of;
   - to restart her as administrator / with sudo, she tells you to start Lain again and type
     `/resume` (your conversation is already saved in the vault).
+- **Updates appear as soon as you push.** Lain used to look only at GitHub *releases* and *tags*, so a
+  push with a new `VERSION` showed "up to date". Now the start-up check and menu `u` read `VERSION` on
+  the `main` branch first: if it's newer than the drive, Lain asks whether to update (the notes come
+  from this changelog). Releases/tags are still used if `main` can't be read.
 - **Search tips:** when a file search finds nothing, Lain is told why (the name filter matched no
   files in that folder, or the pattern is case-sensitive) so she widens the search instead of giving up.
 

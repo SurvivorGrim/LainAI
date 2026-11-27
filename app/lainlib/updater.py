@@ -142,24 +142,73 @@ def app_version(root):
         return "none"
 
 
+APP_BRANCH = "main"                  # pushing a bumped VERSION to this branch is a new Lain version
+
+
+def _gh_file(path, timeout):
+    """A text file from the repo's main branch (via the API: fresh right after a push, unlike the raw CDN)."""
+    import base64
+    d = get_json("%s/%s/contents/%s?ref=%s" % (GH, APP_REPO, path, APP_BRANCH), timeout)
+    return base64.b64decode(d.get("content") or "").decode("utf-8", "replace")
+
+
+def _changelog_notes(text, ver):
+    """The CHANGELOG.md section for version `ver` (a '## X.Y.Z ...' heading up to the next '## ')."""
+    out, on = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if on:
+                break
+            on = parse_version(line[3:].split()[0] if line[3:].split() else "") == ver
+            continue
+        if on:
+            out.append(line)
+    return "\n".join(out).strip().replace("**", "").replace("`", "")     # plain text for the terminal
+
+
 def check_app(root, timeout=30):
-    """Newest Lain release on GitHub, if it's newer than this drive's VERSION."""
-    cur = app_version(root)
+    """A newer Lain on GitHub, if there is one: the VERSION on the main branch first (a push with a bumped
+    VERSION is an update), then published releases/tags. None when this drive is up to date."""
+    cur = parse_version(app_version(root))
     try:
-        rel = get_json("%s/%s/releases/latest" % (GH, APP_REPO), timeout)
-        tag, notes = rel["tag_name"], (rel.get("body") or "").strip()
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-        tags = get_json("%s/%s/tags?per_page=100" % (GH, APP_REPO), timeout)   # no releases yet: use plain tags
-        tags = [t["name"] for t in tags if parse_version(t["name"])]
-        if not tags:
-            return None
-        tag, notes = max(tags, key=parse_version), ""
+        main_ver = parse_version(_gh_file("VERSION", timeout).strip())
+    except (OSError, ValueError, KeyError) as e:
+        main_ver, main_err = None, e
+    else:
+        main_err = None
+    if main_ver and (not cur or main_ver > cur):
+        tag = "v%d.%d.%d" % main_ver
+        try:
+            notes = _changelog_notes(_gh_file("CHANGELOG.md", timeout), main_ver)
+        except (OSError, ValueError, KeyError):
+            notes = ""
+        return {"kind": "app", "label": "Lain    app", "detail": "%s -> %s" % (app_version(root), tag[1:]),
+                "bytes": 0, "tag": tag, "notes": notes,
+                "url": "https://github.com/%s/archive/refs/heads/%s.zip" % (APP_REPO, APP_BRANCH)}
+    if main_ver:
+        return None                     # main's VERSION is the newest there is: up to date
+    try:                                # main unreadable: fall back to published releases / tags
+        try:
+            rel = get_json("%s/%s/releases/latest" % (GH, APP_REPO), timeout)
+            tag, notes = rel["tag_name"], (rel.get("body") or "").strip()
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            tags = get_json("%s/%s/tags?per_page=100" % (GH, APP_REPO), timeout)   # no releases: plain tags
+            tags = [t["name"] for t in tags if parse_version(t["name"])]
+            if not tags:
+                if main_err:
+                    raise main_err
+                return None
+            tag, notes = max(tags, key=parse_version), ""
+    except (OSError, ValueError, KeyError):
+        if main_err:
+            raise main_err
+        raise
     new = parse_version(tag)
-    if not new or (parse_version(cur) and new <= parse_version(cur)):
+    if not new or (cur and new <= cur):
         return None
-    return {"kind": "app", "label": "Lain    app", "detail": "%s -> %s" % (cur, tag.lstrip("v")), "bytes": 0,
+    return {"kind": "app", "label": "Lain    app", "detail": "%s -> %s" % (app_version(root), tag.lstrip("v")), "bytes": 0,
             "tag": tag, "notes": notes, "url": "https://github.com/%s/archive/refs/tags/%s.zip" % (APP_REPO, tag)}
 
 
