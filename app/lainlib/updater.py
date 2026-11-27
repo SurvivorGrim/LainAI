@@ -166,6 +166,25 @@ def _changelog_notes(text, ver):
     return "\n".join(out).strip().replace("**", "").replace("`", "")     # plain text for the terminal
 
 
+def notes_summary(notes, width=88, most=6):
+    """The short summary at the top of a version's notes (the lines before the first bullet), wrapped to fit.
+    Without one, the first words of each bullet."""
+    import textwrap
+    head = []
+    for line in (notes or "").splitlines():
+        if line.lstrip().startswith(("- ", "* ")):
+            break
+        if line.strip():
+            head.append(line.strip())
+    if not head:
+        head = [re.sub(r"\s+", " ", l.strip()[2:]).split(". ")[0] for l in (notes or "").splitlines()
+                if l.startswith(("- ", "* "))]
+    out = []
+    for h in head:
+        out += textwrap.wrap(h, width) or [""]
+    return out[:most]
+
+
 def check_app(root, timeout=30):
     """A newer Lain on GitHub, if there is one: the VERSION on the main branch first (a push with a bumped
     VERSION is an update), then published releases/tags. None when this drive is up to date."""
@@ -216,9 +235,8 @@ def _install_app(root, it, tmp):
     """Download the release, check it, then let ITS installer copy the program files (--app-only)."""
     ui.out()
     ui.hi("Lain %s" % it["tag"])
-    if it.get("notes"):
-        for l in it["notes"].splitlines()[:15]:
-            ui.say(l.rstrip()[:100])
+    for l in notes_summary(it.get("notes"), 100):
+        ui.say(l)
     arch = os.path.join(tmp, "lain-%s.zip" % it["tag"])
     try:
         with ui.Spinner("downloading Lain %s from GitHub" % it["tag"]) as sp:
@@ -592,9 +610,8 @@ def offer_update(root, it):
     """Ask before the vault opens. Returns True when a new version was installed (caller restarts Lain)."""
     ui.out()
     ui.center("A newer Lain is waiting in the Wired:  v%s  ->  v%s" % (app_version(root), it["tag"].lstrip("v")), ui.HI)
-    for l in (it.get("notes") or "").splitlines()[:6]:
-        if l.strip():
-            ui.center(l.strip()[:90], ui.DIM)
+    for l in notes_summary(it.get("notes")):
+        ui.center(l, ui.DIM)
     ui.out()
     a = ui.ask("Update now? [y]es / [n]ot now / [s]kip this version ", 70, fresh=True).strip().lower()
     if a.startswith("s"):

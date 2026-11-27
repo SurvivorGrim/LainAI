@@ -1,19 +1,20 @@
 # Changelog
 
 Lain AI uses [semantic versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
-The version lives in the `VERSION` file. Each release is a GitHub release tagged `vX.Y.Z`.
-Lain's update menu (`u`) checks the latest release and offers to install it.
+The version lives in the `VERSION` file. When `VERSION` on the `main` branch is newer than a drive's copy,
+Lain offers the update at start-up (and in menu `u`), showing the short summary at the top of that
+version's section below.
 
 ## 1.2.0 (2026-11-27)
 
-From a real SysAdmin test: "my RGB isn't on the Breath profile". The breathing service had been dropped at
-boot by a dependency loop. Lain blamed the (intended) GPU temperature script instead, because an `&&` chain
-hid the check that would have found it.
+New service_health tool: finds services that should be running but aren't.
+A search that finds nothing no longer counts as a failed step.
+Clearer feedback when a command chain stops early.
 
 - **New tool `service_health`** (Linux + Windows, read-only): what's supposed to run but isn't.
   - Linux: failed services, services enabled for boot/login that are NOT running (and whether they started
     at all this boot), and this boot's warnings from systemd: ordering cycles, crashes, failed starts. With
-    a name (e.g. `rgb`) it also shows each matching service's status, unit file ordering, recent log lines
+    a name (e.g. `nginx`) it also shows each matching service's status, unit file ordering, recent log lines
     and every log line of this boot that mentions it.
   - Windows: automatic services that aren't running, your own scheduled tasks whose last run failed,
     errors since boot, and with a name: matching services, tasks, startup entries, processes and log events.
@@ -27,11 +28,13 @@ hid the check that would have found it.
 
 ## 1.1.0 (2026-11-27)
 
-Fixes from real test sessions (a Windows security review and a Windows install fix).
+Lain waits for your answer before acting on choices.
+Multi-line pastes arrive as one message.
+Repeated look-ups are caught by the loop breaker.
+Updates are offered as soon as a new version is on GitHub.
 
-- **Lain waits for your answer.** The finishing check used to tell Lain to "finish the plan" even
-  right after she'd asked you a question, so she acted on choices you hadn't made yet (in testing
-  she deleted saved credentials before you'd picked which ones). Now:
+- **Lain waits for your answer.** The finishing check could tell Lain to "finish the plan" right after
+  she'd asked you a question, so she could act on choices you hadn't made yet. Now:
   - when her reply asks you something and she hasn't changed anything, there is no check: your
     answer comes first;
   - when she changed something *and* asks you something, she only verifies what's already done and
@@ -58,10 +61,9 @@ Fixes from real test sessions (a Windows security review and a Windows install f
   - no re-running look-ups she already has the output of;
   - to restart her as administrator / with sudo, she tells you to start Lain again and type
     `/resume` (your conversation is already saved in the vault).
-- **Updates appear as soon as you push.** Lain used to look only at GitHub *releases* and *tags*, so a
-  push with a new `VERSION` showed "up to date". Now the start-up check and menu `u` read `VERSION` on
-  the `main` branch first: if it's newer than the drive, Lain asks whether to update (the notes come
-  from this changelog). Releases/tags are still used if `main` can't be read.
+- **Updates appear as soon as they're published.** Lain used to look only at GitHub *releases* and *tags*.
+  Now the start-up check and menu `u` read `VERSION` on the `main` branch first: if it's newer than the
+  drive, Lain asks whether to update. Releases/tags are still used if `main` can't be read.
 - **Search tips:** when a file search finds nothing, Lain is told why (the name filter matched no
   files in that folder, or the pattern is case-sensitive) so she widens the search instead of giving up.
 
@@ -106,7 +108,7 @@ First versioned release.
   design one owner per device using the tool's own persistent mechanisms, build small and
   **measure against the goal** (timing, CPU, log growth), make it survive reboot, clean up
   what it replaced, then report each requirement with evidence and how to undo.
-- SysAdmin troubleshooting habits (learned from a real repair): check suspicions before acting on them,
+- SysAdmin troubleshooting habits: check suspicions before acting on them,
   restore a known-good baseline first, read live state through the program's own API, validate the
   measurement itself, no permanent-memory writes in loops, stable IDs instead of boot-numbered paths,
   leave a sane state on stop, disable things properly and prove it, confirm dependents come back
