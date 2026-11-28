@@ -16,6 +16,43 @@ import tarfile
 import tempfile
 
 IS_WIN = os.name == "nt"
+AGE_MAGIC = b"age-encryption.org/v1\n"
+
+
+def _looks_sealed(path, min_size=0):
+    """True if path is a non-empty age file (right header, plausible size). Cheap: no key needed."""
+    try:
+        if os.path.getsize(path) <= max(min_size, len(AGE_MAGIC)):
+            return False
+        with open(path, "rb") as f:
+            return f.read(len(AGE_MAGIC)) == AGE_MAGIC
+    except OSError:
+        return False
+
+
+def _flush_file(path):
+    """Force a file's data onto the drive (not just the OS write cache)."""
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _flush_dir(path):
+    """Force renames/new names in a folder onto the drive. Not possible (or needed) on Windows."""
+    if IS_WIN:
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class VaultError(Exception):
@@ -29,6 +66,10 @@ class Vault:
         self.id_file = os.path.join(self.dir, "identity.age")
         self.pub_file = os.path.join(self.dir, "recipient.txt")
         self.file = os.path.join(self.dir, "vault.age")
+        self.bak = self.file + ".bak"
+        self.new = self.file + ".new"
+        self.recovered = None    # set by unlock() when vault.age was damaged and a copy was used instead
+        self.main_bad = False    # vault.age didn't open - never rotate it over the good .bak
         if IS_WIN:
             base = os.path.join(tempfile.gettempdir(), "LainAI")
         else:
@@ -68,7 +109,9 @@ class Vault:
 
     # ---- state ----
     def exists(self):
-        return os.path.exists(self.id_file) and os.path.exists(self.file)
+        # any sealed copy counts: if only vault.age is gone/damaged, "no vault" would mean making a NEW key,
+        # and the old copies could never be opened again
+        return os.path.exists(self.id_file) and any(os.path.exists(f) for f in (self.file, self.bak, self.new))
 
     def leftover(self):
         return os.path.isdir(self.work)
@@ -102,20 +145,50 @@ class Vault:
             raise VaultError("could not protect the vault key: " + err)
         with open(self.pub_file, "w", newline="\n") as f:
             f.write(pub + "\n")
+        _flush_file(self.id_file)
+        _flush_file(self.pub_file)
+        _flush_dir(self.dir)
         self._prepare_tmp()
         os.makedirs(self.files_dir(), exist_ok=True)
         os.makedirs(self.sessions_dir(), exist_ok=True)
         self.lock(keep_open=False)
 
     def unlock(self, passphrase):
-        """Returns True on success, False on a wrong passphrase."""
+        """Returns True on success, False on a wrong passphrase.
+        If vault.age is damaged (e.g. empty after the drive was unplugged mid-save) the newest copy that
+        opens is used instead and self.recovered says which one."""
         code, key, _ = self._age(["-d", "-j", "batchpass", self.id_file], passphrase=passphrase)
         if code:
             return False
-        code, data, err = self._age(["-d", "-i", "-", self.file], data=key)
+        errors = []
+        data = None
+        self.recovered = None
+        self.main_bad = False
+        for path in (self.file, self.new, self.bak):   # .new is complete only if a save stopped between renames
+            if not os.path.exists(path):
+                continue
+            if not _looks_sealed(path):
+                errors.append("%s: %s" % (os.path.basename(path),
+                                          "empty" if os.path.getsize(path) == 0 else "not an age file"))
+                continue
+            code, out, err = self._age(["-d", "-i", "-", path], data=key)
+            if code == 0:
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(out)):
+                        pass
+                except tarfile.TarError as e:
+                    errors.append("%s: %s" % (os.path.basename(path), e))
+                    continue
+                data = out
+                if path != self.file:
+                    self.recovered = (path, os.path.getmtime(path), "; ".join(errors))
+                    self.main_bad = True
+                break
+            errors.append("%s: %s" % (os.path.basename(path), err.splitlines()[0] if err else "failed"))
         del key
-        if code:
-            raise VaultError("vault could not be decrypted: " + err)
+        if data is None:
+            raise VaultError("vault could not be decrypted (your passphrase was right; the vault files are "
+                             "damaged). Nothing was changed. Tried: " + "; ".join(errors or ["no vault files"]))
         self._prepare_tmp()
         if os.path.isdir(self.work):
             shutil.rmtree(self.work)
@@ -141,19 +214,40 @@ class Vault:
         return total
 
     def lock(self, keep_open=False):
+        """Seal the working folder into vault.age. Crash/unplug safe:
+        1. encrypt to vault.age.new, check it, force it onto the drive
+        2. old vault.age -> vault.age.bak (only if the old one is a real sealed vault)
+        3. vault.age.new -> vault.age, force the renames onto the drive
+        At every moment at least one complete copy exists on the drive."""
         if not os.path.isdir(self.work):
             return
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as t:
             t.add(self.work, arcname=".")
+        plain = buf.getvalue()
         pub = open(self.pub_file).read().strip()
-        new = self.file + ".new"
-        code, _, err = self._age(["-r", pub, "-o", new], data=buf.getvalue())
+        try:
+            os.remove(self.new)               # stale leftover from an interrupted save
+        except OSError:
+            pass
+        code, _, err = self._age(["-r", pub, "-o", self.new], data=plain)
         if code:
             raise VaultError("encrypting failed (unlocked files left at %s): %s" % (self.work, err))
-        if os.path.exists(self.file):
-            os.replace(self.file, self.file + ".bak")
-        os.replace(new, self.file)
+        # ciphertext is always bigger than the tar (header + 16 bytes per 64 KiB chunk)
+        if not _looks_sealed(self.new, min_size=len(plain)):
+            raise VaultError("the encrypted vault came out wrong - kept the previous one "
+                             "(unlocked files left at %s)" % self.work)
+        try:
+            _flush_file(self.new)
+            if os.path.exists(self.file) and not self.main_bad and _looks_sealed(self.file):
+                os.replace(self.file, self.bak)
+            # else: vault.age is missing/empty/damaged - keep the last good .bak instead of overwriting it
+            os.replace(self.new, self.file)
+            _flush_dir(self.dir)
+        except OSError as e:
+            raise VaultError("saving the vault to the drive failed (unlocked files left at %s): %s" % (self.work, e))
+        self.main_bad = False
+        self.recovered = None
         if not keep_open:
             self.wipe_work()
 
@@ -168,7 +262,7 @@ class Vault:
             shutil.rmtree(self.tmp, onerror=onerr)
 
     def reset(self):
-        for f in (self.id_file, self.pub_file, self.file, self.file + ".bak", self.file + ".new"):
+        for f in (self.id_file, self.pub_file, self.file, self.bak, self.new):
             try:
                 os.remove(f)
             except OSError:

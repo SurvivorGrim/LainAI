@@ -5,6 +5,23 @@ The version lives in the `VERSION` file. When `VERSION` on the `main` branch is 
 Lain offers the update at start-up (and in menu `u`), showing the short summary at the top of that
 version's section below.
 
+## 1.2.1 (2026-11-28)
+
+Safer vault saving: unplugging the drive right after closing Lain can no longer leave an empty vault.
+If the vault file is damaged anyway, Lain opens the backup copy instead of refusing.
+
+- **Saves are forced onto the drive.** The new vault is written to `vault.age.new`, checked (age header,
+  sensible size), flushed to the drive with fsync, and only then swapped in. Previously it could sit in the
+  computer's write cache, and pulling the drive left a 0-byte `vault.age` ("failed to read header: file is empty").
+- **The backup is protected.** `vault.age` is only moved to `vault.age.bak` if it's a real sealed vault, so a
+  damaged file can never replace a good backup.
+- **Automatic fallback at unlock.** If your passphrase is right but `vault.age` won't open, Lain tries
+  `vault.age.new` and `vault.age.bak`, tells you which copy it opened and how old it is, and keeps the backup
+  until a good new vault is saved. If no copy opens, nothing is changed and the error lists what was tried.
+- A vault with only a backup copy left still counts as a vault, so Lain never offers to make a new key over it.
+- New vault keys are also flushed to the drive when a vault is created.
+- After locking, Lain reminds you to eject the drive before unplugging it.
+
 ## 1.2.0 (2026-11-27)
 
 New service_health tool: finds services that should be running but aren't.

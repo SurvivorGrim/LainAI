@@ -230,6 +230,13 @@ def open_vault(v):
             if ok:
                 n = sum(len(fs) for _, _, fs in os.walk(v.files_dir()))
                 ui.grn("Access granted.")
+                if v.recovered:
+                    path, when, why = v.recovered
+                    ui.center("vault.age was damaged (%s) - probably the drive was unplugged while saving." % (why or "unreadable"), ui.WARN)
+                    ui.center("Opened the backup copy %s from %s instead. Anything saved after that is missing."
+                              % (os.path.basename(path), time.strftime("%Y-%m-%d %H:%M", time.localtime(when))), ui.WARN)
+                    ui.center("The backup is left untouched until a good new vault has been saved.", ui.DIM)
+                    ui.ask("Press Enter to continue ", 24)
                 ui.say("vault open in %s  |  %d files, %s" % ("RAM" if v.work.startswith("/dev/shm") else "temp", n, ui.human(v.size())))
                 time.sleep(0.8)
                 return
@@ -488,6 +495,7 @@ def main():
                     v.lock(keep_open=bool(reboot_out))    # saved to the drive either way
                 ui.grn("Vault saved - restarting Lain..." if reboot_out else "Vault locked. Disconnected.")
                 if not reboot_out:
+                    ui.say("Eject the drive before unplugging it (Linux: Files > eject  |  Windows: Safely Remove).")
                     ui.center(random.choice(GOODBYES), ui.DIM)
             except VaultError as e:
                 ui.red(str(e))
